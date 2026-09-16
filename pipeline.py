@@ -14,16 +14,11 @@ import xml.etree.ElementTree as ET
 
 import requests
 
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import mm
-from reportlab.lib import colors
-from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, PageBreak,
-                                HRFlowable)
+import gc
 
 import gapi
 
-BUILD = "4"
+BUILD = "5"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -388,10 +383,13 @@ def to_english(text: str, key: str, on_step=None) -> str:
               "Translate everything faithfully and completely — do not summarise, "
               "do not skip lines, do not add commentary. Keep proper nouns as they are. "
               "Write flowing paragraphs with normal punctuation. Output only the translation.")
-    for i, ch in enumerate(chunks, 1):
+    total = len(chunks)
+    for i in range(total):
         if on_step:
-            on_step(f"English me badal raha hoon ({i}/{len(chunks)})")
-        out.append(llm(system, ch, key, max_tokens=8000))
+            on_step(f"English me badal raha hoon ({i + 1}/{total})")
+        out.append(llm(system, chunks[i], key, max_tokens=8000))
+        chunks[i] = ""
+        gc.collect()
     return "\n\n".join(out)
 
 
@@ -433,7 +431,24 @@ def esc(t: str) -> str:
     return (t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
+def memory_mb():
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return round(int(line.split()[1]) / 1024)
+    except Exception:
+        pass
+    return 0
+
+
 def build_pdf(title, channel, date_str, link, episode, summary, transcript) -> bytes:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                    PageBreak, HRFlowable)
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
@@ -554,6 +569,10 @@ def process_video(video, channel_name, s, recipients, episode_no, serial_no):
             f"Full transcript is in the attached PDF.\n")
     if recipients:
         gapi.send_mail(recipients, subject, body, attachment=pdf, attachment_name=fname)
+    log("mem", f"{memory_mb()} MB — {video['title'][:40]}")
+
+    del pdf
+    gc.collect()
 
     step("Sheet me likh raha hoon")
     sheet_transcript = english
@@ -623,6 +642,9 @@ def run_check(manual=False):
             fresh.sort(key=lambda v: v["published"])
 
             for v in fresh:
+                if done >= 1:
+                    STATUS["step"] = "ek video ho gaya, baaki agli baari me"
+                    break
                 st = states.get(v["video_id"])
                 if st and str(st.get("Attempts")) == "done":
                     continue
@@ -638,6 +660,7 @@ def run_check(manual=False):
                     seen.add(v["video_id"])
                     clear_state(v["video_id"], states)
                     done += 1
+                    gc.collect()
                 except Exception as e:
                     serial -= 1
                     attempts = bump_state(v["video_id"], e, states)

@@ -21,7 +21,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
-BUILD = "4"
+BUILD = "5"
 
 
 # ---------------------------------------------------------------- background
@@ -54,7 +54,7 @@ def _keepalive_loop():
 
 
 def _scheduler_loop():
-    time.sleep(90)                       # app poori tarah shuru ho jaaye
+    time.sleep(600)                      # pehle UI khulne dijiye, phir kaam
     while True:
         hours = 3.0
         try:
