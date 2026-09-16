@@ -21,7 +21,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
-BUILD = "2"
+BUILD = "3"
 
 
 # ---------------------------------------------------------------- background
@@ -588,7 +588,11 @@ def oauth_start():
     if not os.environ.get("GOOGLE_CLIENT_ID"):
         return page("Google", "<h2>Google</h2><div class='msg bad'>Pehle Render me "
                     "GOOGLE_CLIENT_ID aur GOOGLE_CLIENT_SECRET daaliye.</div>", "/settings")
+    import secrets
+    verifier = secrets.token_urlsafe(64)[:96]
+    session["code_verifier"] = verifier
     flow = make_flow()
+    flow.code_verifier = verifier
     auth_url, state = flow.authorization_url(
         access_type="offline", prompt="consent", include_granted_scopes="true")
     session["oauth_state"] = state
@@ -599,6 +603,7 @@ def oauth_start():
 def oauth_callback():
     try:
         flow = make_flow()
+        flow.code_verifier = session.get("code_verifier")
         flow.fetch_token(authorization_response=request.url.replace("http://", "https://")
                          if "localhost" not in request.url else request.url)
         creds = flow.credentials
