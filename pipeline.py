@@ -18,7 +18,7 @@ import gc
 
 import gapi
 
-BUILD = "5"
+BUILD = "6"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -61,10 +61,10 @@ def now_str():
     return dt.datetime.now().strftime("%d %b %Y, %I:%M %p")
 
 
-def settings():
+def settings(force=False):
     s = dict(DEFAULTS)
     try:
-        s.update(gapi.get_settings())
+        s.update(gapi.get_settings(force=force))
     except Exception:
         pass
     return s
@@ -500,7 +500,7 @@ def build_pdf(title, channel, date_str, link, episode, summary, transcript) -> b
 
 def state_map():
     out = {}
-    for row in gapi.read_rows("State"):
+    for row in gapi.read_all(force=True)["state"]:
         if row.get("Video ID"):
             out[row["Video ID"]] = row
     return out
@@ -600,20 +600,22 @@ def run_check(manual=False):
     done, failed, skipped = 0, 0, 0
     try:
         gapi.ensure_tabs()
-        s = settings()
+        data = gapi.read_all(force=True)
+        s = dict(DEFAULTS)
+        s.update(data["settings"])
         if s.get("paused") == "yes" and not manual:
             STATUS["last_result"] = "Rok lagi hui hai (Settings me)."
             return STATUS["last_result"]
 
-        channels = [c for c in gapi.read_rows("Channels")
+        channels = [c for c in data["channels"]
                     if c.get("Channel ID") and c.get("Active", "yes") != "no"]
-        recipients = [r["Email"].strip() for r in gapi.read_rows("Recipients")
+        recipients = [r["Email"].strip() for r in data["recipients"]
                       if r.get("Email") and r.get("Active", "yes") != "no"]
         if not channels:
             STATUS["last_result"] = "Koi channel joda hi nahi gaya."
             return STATUS["last_result"]
 
-        episodes = gapi.episodes_light()
+        episodes = data["episodes"]
         seen = {e.get("Video ID") for e in episodes if e.get("Video ID")}
         serial = len(episodes)
         per_channel = {}
@@ -622,7 +624,7 @@ def run_check(manual=False):
             per_channel[ch] = max(per_channel.get(ch, 0),
                                   int(e.get("Episode") or 0) if str(e.get("Episode", "")).isdigit() else 0)
 
-        states = state_map()
+        states = {r["Video ID"]: r for r in data["state"] if r.get("Video ID")}
         lookback = int(s.get("lookback_days", "5") or 5)
         cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=lookback)
 

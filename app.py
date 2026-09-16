@@ -21,7 +21,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
-BUILD = "5"
+BUILD = "6"
 
 
 # ---------------------------------------------------------------- background
@@ -224,15 +224,15 @@ def dashboard():
         return page("Setup", SETUP_BODY, "/")
     try:
         gapi.ensure_tabs()
-        eps = gapi.episodes_light()
-        chans = gapi.read_rows("Channels")
-        recips = [r for r in gapi.read_rows("Recipients")
-                  if r.get("Active", "yes") != "no"]
+        data = gapi.read_all()
+        eps = data["episodes"]
+        chans = data["channels"]
+        recips = [r for r in data["recipients"] if r.get("Active", "yes") != "no"]
     except Exception as ex:
         return page("Dashboard", f"<h2>Dashboard</h2><div class='msg bad'>"
                     f"Google se baat nahi ho paayi: {e(ex)}</div>", "/")
 
-    s = pipeline.settings()
+    s = data["settings"]
     st = pipeline.STATUS
     latest = eps[-1] if eps else None
 
@@ -333,7 +333,7 @@ def channels():
     if request.method == "POST":
         action = request.form.get("action")
         try:
-            rows = gapi.read_rows("Channels")
+            rows = gapi.read_all(force=True)["channels"]
             if action == "add":
                 cid, name = pipeline.resolve_channel(request.form.get("channel", ""))
                 if any(r["Channel ID"] == cid for r in rows):
@@ -349,7 +349,7 @@ def channels():
         except Exception as ex:
             return back("/channels", f"Nahi ho paya: {ex}", True)
 
-    rows = gapi.read_rows("Channels")
+    rows = gapi.read_all()["channels"]
     trs = "".join(f"""<tr><td><strong>{e(r.get('Name'))}</strong>
         <div class="note">{e(r.get('Channel ID'))}</div></td>
         <td class="note">{e(r.get('Added On'))}</td>
@@ -376,7 +376,7 @@ def channels():
 @app.route("/recipients", methods=["GET", "POST"])
 def recipients():
     if request.method == "POST":
-        rows = gapi.read_rows("Recipients")
+        rows = gapi.read_all(force=True)["recipients"]
         if request.form.get("action") == "add":
             email = (request.form.get("email") or "").strip()
             if "@" not in email:
@@ -388,7 +388,7 @@ def recipients():
         gapi.replace_tab("Recipients", gapi.TABS["Recipients"], keep)
         return back("/recipients", "Hata diya.")
 
-    rows = gapi.read_rows("Recipients")
+    rows = gapi.read_all()["recipients"]
     trs = "".join(f"""<tr><td>{e(r.get('Email'))}<div class="note">{e(r.get('Name'))}</div></td>
         <td style="text-align:right"><form method="post" style="margin:0">
         <input type="hidden" name="action" value="delete">
@@ -413,7 +413,7 @@ def recipients():
 @app.route("/library")
 def library():
     q = (request.args.get("q") or "").lower().strip()
-    rows = list(reversed(gapi.episodes_light()))
+    rows = list(reversed(gapi.read_all()["episodes"]))
     if q:
         rows = [r for r in rows if q in (r.get("Title", "") + r.get("Summary", "")).lower()]
     trs = "".join(f"""<tr>
@@ -441,9 +441,10 @@ def library():
 @app.route("/resend", methods=["POST"])
 def resend():
     try:
-        rows = gapi.episodes_light()
+        data = gapi.read_all()
+        rows = data["episodes"]
         row = next(r for r in rows if str(r["_row"]) == request.form.get("row"))
-        to = [r["Email"] for r in gapi.read_rows("Recipients")
+        to = [r["Email"] for r in data["recipients"]
               if r.get("Email") and r.get("Active", "yes") != "no"]
         if not to:
             return back("/library", "Kisi ka email pata nahi mila.", True)

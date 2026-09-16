@@ -42,9 +42,13 @@ TABS = {
     "Log": ["Time", "Level", "Message"],
 }
 
+import time as _time
+
 _lock = threading.Lock()
 _cache = {"creds": None, "sheet_id": None, "root_folder": None, "month_folders": {},
-          "svc": {}}
+          "svc": {}, "email": "", "tabs_ok": False}
+_bundle = {"at": 0.0, "data": None}
+BUNDLE_TTL = 45          # second — itni der purana data chalega
 
 
 # ---------------------------------------------------------------- credentials
@@ -97,9 +101,12 @@ def _svc(name, version):
 
 
 def account_email() -> str:
+    if _cache.get("email"):
+        return _cache["email"]
     try:
         info = _svc("oauth2", "v2").userinfo().get().execute()
-        return info.get("email", "")
+        _cache["email"] = info.get("email", "")
+        return _cache["email"]
     except Exception:
         return ""
 
@@ -162,8 +169,11 @@ def _freeze_header(sid):
         pass
 
 
-def ensure_tabs():
-    """Purani sheet me koi tab kam ho to jod deta hai."""
+def ensure_tabs(force=False):
+    """Purani sheet me koi tab kam ho to jod deta hai. Ek hi baar chalta hai."""
+    if _cache.get("tabs_ok") and not force:
+        return
+    _cache["tabs_ok"] = True
     sid = spreadsheet_id()
     sheets = _svc("sheets", "v4")
     meta = sheets.spreadsheets().get(spreadsheetId=sid).execute()
@@ -182,6 +192,64 @@ def ensure_tabs():
 
 def sheet_url() -> str:
     return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id()}/edit"
+
+
+def invalidate():
+    _bundle["at"] = 0.0
+
+
+def read_all(force=False):
+    """Channels, Recipients, Settings, Episodes aur State — sab ek hi
+    request me. Pehle har cheez alag maangi jaati thi, isi se der lagti thi."""
+    if not force and _bundle["data"] and (_time.time() - _bundle["at"]) < BUNDLE_TTL:
+        return _bundle["data"]
+    ranges = [
+        "Channels!A2:D1000", "Recipients!A2:C1000", "Settings!A2:B300",
+        "Episodes!A2:E100000", "Episodes!G2:K100000", "State!A2:D5000",
+    ]
+    res = _svc("sheets", "v4").spreadsheets().values().batchGet(
+        spreadsheetId=spreadsheet_id(), ranges=ranges).execute()
+    vr = [r.get("values", []) for r in res.get("valueRanges", [])]
+    while len(vr) < 6:
+        vr.append([])
+
+    def rows(raw, keys, start=2):
+        out = []
+        for i, row in enumerate(raw):
+            row = (list(row) + [""] * len(keys))[:len(keys)]
+            d = dict(zip(keys, row))
+            d["_row"] = i + start
+            if any(str(v).strip() for k, v in d.items() if k != "_row"):
+                out.append(d)
+        return out
+
+    episodes = []
+    a, b = vr[3], vr[4]
+    for i in range(max(len(a), len(b))):
+        ra = ((list(a[i]) if i < len(a) else []) + [""] * 5)[:5]
+        rb = ((list(b[i]) if i < len(b) else []) + [""] * 5)[:5]
+        if not (ra[3] or rb[1] or rb[3]):
+            continue
+        episodes.append({
+            "_row": i + 2, "Sr.No.": ra[0], "Date": ra[1], "Episode": ra[2],
+            "Video Link": ra[3], "PDF": ra[4], "Summary": rb[0], "Title": rb[1],
+            "Channel": rb[2], "Video ID": rb[3], "Sent To": rb[4],
+        })
+
+    settings = {}
+    for row in vr[2]:
+        if row and row[0]:
+            settings[row[0]] = row[1] if len(row) > 1 else ""
+
+    data = {
+        "channels": rows(vr[0], TABS["Channels"]),
+        "recipients": rows(vr[1], TABS["Recipients"]),
+        "settings": settings,
+        "episodes": episodes,
+        "state": rows(vr[5], TABS["State"]),
+    }
+    _bundle.update({"at": _time.time(), "data": data})
+    return data
 
 
 def read_tab(tab: str):
@@ -240,6 +308,7 @@ def append_row(tab: str, row: list):
         insertDataOption="INSERT_ROWS",
         body={"values": [row]},
     ).execute()
+    invalidate()
 
 
 def append_rows(tab: str, rows: list):
@@ -252,6 +321,7 @@ def append_rows(tab: str, rows: list):
         insertDataOption="INSERT_ROWS",
         body={"values": rows},
     ).execute()
+    invalidate()
 
 
 def write_range(tab: str, a1: str, values: list):
@@ -261,6 +331,7 @@ def write_range(tab: str, a1: str, values: list):
         valueInputOption="USER_ENTERED",
         body={"values": values},
     ).execute()
+    invalidate()
 
 
 def replace_tab(tab: str, header: list, rows: list):
@@ -272,20 +343,17 @@ def replace_tab(tab: str, header: list, rows: list):
         valueInputOption="USER_ENTERED",
         body={"values": [header] + rows},
     ).execute()
+    invalidate()
 
 
 # ---------------------------------------------------------------- settings tab
 
-def get_settings() -> dict:
-    out = {}
-    for row in read_tab("Settings")[1:]:
-        if row and row[0]:
-            out[row[0]] = row[1] if len(row) > 1 else ""
-    return out
+def get_settings(force=False) -> dict:
+    return dict(read_all(force=force)["settings"])
 
 
 def set_settings(updates: dict):
-    current = get_settings()
+    current = get_settings(force=True)
     current.update({k: str(v) for k, v in updates.items()})
     rows = [[k, v] for k, v in sorted(current.items())]
     replace_tab("Settings", TABS["Settings"], rows)
