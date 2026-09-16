@@ -7,6 +7,7 @@ Koi service account nahi, koi app password nahi.
 import io
 import os
 import base64
+import socket
 import threading
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -16,6 +17,8 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+
+socket.setdefaulttimeout(90)    # koi bhi request 90 second se zyada na latke
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
@@ -44,7 +47,8 @@ TABS = {
 
 import time as _time
 
-_lock = threading.Lock()
+_lock = threading.RLock()      # RLock: ek hi dhaage ko dobara taala
+                               # lagane deta hai, warna wo khud atak jaata hai
 _cache = {"creds": None, "sheet_id": None, "root_folder": None, "month_folders": {},
           "svc": {}, "email": "", "tabs_ok": False}
 _bundle = {"at": 0.0, "data": None}
@@ -91,10 +95,11 @@ def _svc(name, version):
     svc = _cache["svc"].get(key)
     if svc is not None:
         return svc
+    creds = credentials()          # taale ke bahar, taaki fanda na bane
     with _lock:
         svc = _cache["svc"].get(key)
         if svc is None:
-            svc = build(name, version, credentials=credentials(),
+            svc = build(name, version, credentials=creds,
                         cache_discovery=False, static_discovery=True)
             _cache["svc"][key] = svc
     return svc
