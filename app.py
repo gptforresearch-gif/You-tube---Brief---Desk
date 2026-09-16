@@ -21,7 +21,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
-BUILD = "3"
+BUILD = "4"
 
 
 # ---------------------------------------------------------------- background
@@ -44,7 +44,7 @@ def _own_url():
 def _keepalive_loop():
     SCHED["own_url"] = _own_url()
     while True:
-        time.sleep(600)
+        time.sleep(720)
         if not SCHED["keep_awake"] or not SCHED["own_url"]:
             continue
         try:

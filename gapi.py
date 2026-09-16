@@ -43,7 +43,8 @@ TABS = {
 }
 
 _lock = threading.Lock()
-_cache = {"creds": None, "sheet_id": None, "root_folder": None, "month_folders": {}}
+_cache = {"creds": None, "sheet_id": None, "root_folder": None, "month_folders": {},
+          "svc": {}}
 
 
 # ---------------------------------------------------------------- credentials
@@ -74,11 +75,25 @@ def credentials():
         )
         creds.refresh(Request())
         _cache["creds"] = creds
+        _cache["svc"] = {}
         return creds
 
 
 def _svc(name, version):
-    return build(name, version, credentials=credentials(), cache_discovery=False)
+    """Connection ek hi baar banta hai aur sambhaal kar rakha jaata hai.
+    Har baar naya banane me Google ka bhaari discovery document utarta tha,
+    jisse Render ki 512 MB waali memory bhar jaati thi."""
+    key = f"{name}:{version}"
+    svc = _cache["svc"].get(key)
+    if svc is not None:
+        return svc
+    with _lock:
+        svc = _cache["svc"].get(key)
+        if svc is None:
+            svc = build(name, version, credentials=credentials(),
+                        cache_discovery=False, static_discovery=True)
+            _cache["svc"][key] = svc
+    return svc
 
 
 def account_email() -> str:
