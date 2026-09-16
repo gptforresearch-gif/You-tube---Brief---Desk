@@ -1,6 +1,7 @@
 """YouTube Brief Desk — browser wala hissa."""
 
 import os
+import re
 import html
 import datetime as dt
 
@@ -21,7 +22,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
-BUILD = "8"
+BUILD = "10"
 
 
 # ---------------------------------------------------------------- background
@@ -153,8 +154,9 @@ td{padding:11px 8px;border-bottom:1px solid var(--line);vertical-align:top}
 }
 """
 
-NAV = [("/", "Dashboard"), ("/library", "Library"), ("/channels", "Channels"),
-       ("/recipients", "Recipients"), ("/settings", "Settings"), ("/logs", "Logs")]
+NAV = [("/", "Dashboard"), ("/add", "Add video"), ("/library", "Library"),
+       ("/channels", "Channels"), ("/recipients", "Recipients"),
+       ("/settings", "Settings"), ("/logs", "Logs")]
 
 SHELL = """<!doctype html><html lang="hi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -230,7 +232,7 @@ def dashboard():
     try:
         gapi.ensure_tabs()
         data = gapi.read_all()
-        eps = data["episodes"]
+        eps = data["episodes"] + data["links"]
         chans = data["channels"]
         recips = [r for r in data["recipients"] if r.get("Active", "yes") != "no"]
     except Exception as ex:
@@ -414,12 +416,72 @@ def recipients():
     return page("Recipients", body, "/recipients")
 
 
+# ---------------------------------------------------------------- add video
+
+@app.route("/add", methods=["GET", "POST"])
+def add_video():
+    if request.method == "POST":
+        raw = request.form.get("links", "")
+        emails = request.form.get("emails", "").strip()
+        instruction = request.form.get("instruction", "").strip()
+        found, bad = [], []
+        for line in re.split(r"[\s,]+", raw):
+            line = line.strip()
+            if not line:
+                continue
+            vid = pipeline.extract_video_id(line)
+            (found if vid else bad).append(vid or line)
+        if not found:
+            return back("/add", "No YouTube links found in that text.", True)
+        today = dt.date.today().strftime("%d %b %Y")
+        gapi.append_rows("Queue", [
+            [f"https://www.youtube.com/watch?v={v}", today, emails, "pending",
+             instruction] for v in found])
+        pipeline.run_in_background(manual=True)
+        note = f"{len(found)} video(s) queued. They will be emailed shortly."
+        if bad:
+            note += f" {len(bad)} line(s) skipped."
+        return back("/add", note)
+
+    q = gapi.read_all()["queue"]
+    waiting = [r for r in q if (r.get("Status") or "").lower() == "pending"]
+    recent = list(reversed(q))[:15]
+    trs = "".join(f"""<tr><td>{e(r.get('Video Link'))}</td>
+        <td class="note" style="white-space:nowrap">{e(r.get('Added'))}</td>
+        <td class="note">{e(r.get('Status'))}</td></tr>""" for r in recent)
+    body = f"""<h2>Add video</h2>
+    <p class="sub">Paste any YouTube links — they do not have to be from your
+      channels. Each one gets a transcript, an English summary, a PDF by email,
+      and a row in the <strong>Links</strong> tab of your Sheet. You can also say
+      what should be written instead of the usual summary.</p>
+    <div class="card"><form method="post">
+      <label>YouTube links (one per line)</label>
+      <textarea name="links" rows="5"
+        placeholder="https://www.youtube.com/watch?v=..."></textarea>
+      <label>Send to (optional — leave blank to use your usual recipients)</label>
+      <input name="emails" placeholder="someone@example.com, another@example.com">
+      <label>What should be written? (optional — leave blank for your usual
+        setting in Settings)</label>
+      <textarea name="instruction" rows="3"
+        placeholder="e.g. List the main arguments as bullet points, with the legal
+points first. Or: write it as questions and answers. Or: a 200-word note for a
+newsletter."></textarea>
+      <div style="margin-top:13px"><button class="btn">Fetch and send</button></div>
+    </form></div>
+    {f'<p class="note">{len(waiting)} waiting in the queue.</p>' if waiting else ''}
+    {'<div class="card"><table><tr><th>Link</th><th>Added</th><th>Status</th></tr>'
+     + trs + '</table></div>' if recent else ''}"""
+    return page("Add video", body, "/add")
+
+
 # ---------------------------------------------------------------- library
 
 @app.route("/library")
 def library():
     q = (request.args.get("q") or "").lower().strip()
-    rows = list(reversed(gapi.read_all()["episodes"]))
+    which = "links" if request.args.get("tab") == "links" else "episodes"
+    data = gapi.read_all()
+    rows = list(reversed(data[which]))
     if q:
         rows = [r for r in rows if q in (r.get("Title", "") + r.get("Summary", "")).lower()]
     trs = "".join(f"""<tr>
@@ -433,10 +495,18 @@ def library():
             <a class="btn small ghost" href="{e(r.get('Video Link'))}" target="_blank">Video</a>
             <form method="post" action="/resend" style="margin:0">
               <input type="hidden" name="row" value="{r['_row']}">
+              <input type="hidden" name="title" value="{e(r.get('Title'))}">
               <button class="btn small ghost">Email again</button></form>
           </div></td></tr>""" for r in rows[:200])
-    body = f"""<h2>Library</h2><p class="sub">{len(rows)} episodes.</p>
+    other = "episodes" if which == "links" else "links"
+    counts = {"episodes": len(data["episodes"]), "links": len(data["links"])}
+    body = f"""<h2>Library</h2>
+    <p class="sub">{counts[which]} {'pasted links' if which == 'links' else 'episodes'}
+      &nbsp;·&nbsp; <a href="/library?tab={other}">show
+      {'channel episodes' if which == 'links' else 'pasted links'}
+      ({counts[other]})</a></p>
     <form class="card" method="get"><div class="row">
+      <input type="hidden" name="tab" value="{which}">
       <input name="q" value="{e(q)}" placeholder="search title or summary"
         style="flex:1;min-width:200px"><button class="btn">Search</button></div></form>
     {'<div class="card"><table>' + trs + '</table></div>' if rows else
@@ -448,8 +518,10 @@ def library():
 def resend():
     try:
         data = gapi.read_all()
-        rows = data["episodes"]
-        row = next(r for r in rows if str(r["_row"]) == request.form.get("row"))
+        rows = data["episodes"] + data["links"]
+        want = request.form.get("row")
+        row = next(r for r in rows if str(r["_row"]) == want
+                   and r.get("Title") == request.form.get("title", r.get("Title")))
         to = [r["Email"] for r in data["recipients"]
               if r.get("Email") and r.get("Active", "yes") != "no"]
         if not to:
@@ -480,6 +552,8 @@ def settings_page():
             "check_every_hours": request.form.get("check_every_hours", "3"),
             "keep_awake": "yes" if request.form.get("keep_awake") else "no",
             "email_subject": request.form.get("email_subject", "{title}"),
+            "output_instruction": request.form.get("output_instruction", "").strip(),
+            "output_title": request.form.get("output_title", "Summary").strip(),
             "openrouter_key": request.form.get("openrouter_key", "").strip(),
             "supadata_key": request.form.get("supadata_key", "").strip(),
         })
@@ -503,6 +577,16 @@ def settings_page():
           <input name="lookback_days" value="{e(s.get('lookback_days'))}"></div>
         <div><label>Check for new videos every (hours)</label>
           <input name="check_every_hours" value="{e(s.get('check_every_hours', '3'))}"></div>
+      </div>
+      <label>What should be written for every video?</label>
+      <textarea name="output_instruction" rows="4"
+        placeholder="Leave blank for a plain English summary. Or write your own, e.g.
+&quot;Pull out every legal point and list it with the reasoning&quot;, or
+&quot;Write detailed study notes with headings&quot;.">{e(s.get('output_instruction'))}</textarea>
+      <div class="grid" style="margin-top:12px">
+        <div><label>Heading for that section (in the PDF and email)</label>
+          <input name="output_title" value="{e(s.get('output_title') or 'Summary')}"></div>
+        <div></div>
       </div>
       <label>Email subject</label>
       <input name="email_subject" value="{e(s.get('email_subject'))}">

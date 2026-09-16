@@ -37,6 +37,8 @@ EPISODE_HEADER = [
 ]
 TABS = {
     "Episodes": EPISODE_HEADER,
+    "Links": EPISODE_HEADER,
+    "Queue": ["Video Link", "Added", "Emails", "Status", "Instruction"],
     "Channels": ["Channel ID", "Name", "Added On", "Active"],
     "Recipients": ["Email", "Name", "Active"],
     "Settings": ["Key", "Value"],
@@ -211,11 +213,12 @@ def read_all(force=False):
     ranges = [
         "Channels!A2:D1000", "Recipients!A2:C1000", "Settings!A2:B300",
         "Episodes!A2:E100000", "Episodes!G2:K100000", "State!A2:D5000",
+        "Links!A2:E100000", "Links!G2:K100000", "Queue!A2:E2000",
     ]
     res = _svc("sheets", "v4").spreadsheets().values().batchGet(
         spreadsheetId=spreadsheet_id(), ranges=ranges).execute()
     vr = [r.get("values", []) for r in res.get("valueRanges", [])]
-    while len(vr) < 6:
+    while len(vr) < 9:
         vr.append([])
 
     def rows(raw, keys, start=2):
@@ -228,18 +231,22 @@ def read_all(force=False):
                 out.append(d)
         return out
 
-    episodes = []
-    a, b = vr[3], vr[4]
-    for i in range(max(len(a), len(b))):
-        ra = ((list(a[i]) if i < len(a) else []) + [""] * 5)[:5]
-        rb = ((list(b[i]) if i < len(b) else []) + [""] * 5)[:5]
-        if not (ra[3] or rb[1] or rb[3]):
-            continue
-        episodes.append({
-            "_row": i + 2, "Sr.No.": ra[0], "Date": ra[1], "Episode": ra[2],
-            "Video Link": ra[3], "PDF": ra[4], "Summary": rb[0], "Title": rb[1],
-            "Channel": rb[2], "Video ID": rb[3], "Sent To": rb[4],
-        })
+    def episode_rows(a, b):
+        out = []
+        for i in range(max(len(a), len(b))):
+            ra = ((list(a[i]) if i < len(a) else []) + [""] * 5)[:5]
+            rb = ((list(b[i]) if i < len(b) else []) + [""] * 5)[:5]
+            if not (ra[3] or rb[1] or rb[3]):
+                continue
+            out.append({
+                "_row": i + 2, "Sr.No.": ra[0], "Date": ra[1], "Episode": ra[2],
+                "Video Link": ra[3], "PDF": ra[4], "Summary": rb[0], "Title": rb[1],
+                "Channel": rb[2], "Video ID": rb[3], "Sent To": rb[4],
+            })
+        return out
+
+    episodes = episode_rows(vr[3], vr[4])
+    links = episode_rows(vr[6], vr[7])
 
     settings = {}
     for row in vr[2]:
@@ -251,7 +258,9 @@ def read_all(force=False):
         "recipients": rows(vr[1], TABS["Recipients"]),
         "settings": settings,
         "episodes": episodes,
+        "links": links,
         "state": rows(vr[5], TABS["State"]),
+        "queue": rows(vr[8], TABS["Queue"]),
     }
     _bundle.update({"at": _time.time(), "data": data})
     return data

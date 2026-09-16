@@ -18,7 +18,7 @@ import gc
 
 import gapi
 
-BUILD = "8"
+BUILD = "10"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -38,6 +38,8 @@ DEFAULTS = {
     "lookback_days": "5",
     "pdf_public": "yes",
     "email_subject": "{title}",
+    "output_instruction": "",
+    "output_title": "Summary",
     "openrouter_key": "",
     "supadata_key": "",
     "paused": "no",
@@ -251,6 +253,48 @@ def resolve_channel_supadata(text: str, key: str):
     return cid, data.get("name") or data.get("title") or cid
 
 
+def extract_video_id(text: str) -> str:
+    """Kisi bhi YouTube link se video id."""
+    text = (text or "").strip()
+    if re.fullmatch(r"[\w-]{11}", text):
+        return text
+    m = (re.search(r"[?&]v=([\w-]{11})", text)
+         or re.search(r"youtu\.be/([\w-]{11})", text)
+         or re.search(r"/(?:shorts|live|embed)/([\w-]{11})", text))
+    return m.group(1) if m else ""
+
+
+def video_meta(video_id: str) -> dict:
+    """Title aur channel — pehle YouTube ka muft oEmbed, phir Supadata."""
+    title, channel = "", ""
+    try:
+        r = requests.get("https://www.youtube.com/oembed",
+                         params={"url": f"https://www.youtube.com/watch?v={video_id}",
+                                 "format": "json"},
+                         headers={"User-Agent": UA}, timeout=20)
+        if r.status_code < 400:
+            j = r.json()
+            title = j.get("title", "")
+            channel = j.get("author_name", "")
+    except Exception:
+        pass
+    if not title:
+        try:
+            v = _sup_get("/v1/youtube/video", {"id": video_id}, supadata_key())
+            title = v.get("title", "")
+            channel = (v.get("channel") or {}).get("name", "") if isinstance(
+                v.get("channel"), dict) else v.get("channelName", "")
+        except Exception:
+            pass
+    return {
+        "video_id": video_id,
+        "title": title or video_id,
+        "channel": channel or "Added by link",
+        "published": dt.datetime.now(dt.timezone.utc),
+        "link": f"https://www.youtube.com/watch?v={video_id}",
+    }
+
+
 # ------------------------------------------------------------------ transcript
 
 def transcript_direct(video_id: str):
@@ -394,36 +438,51 @@ def to_english(text: str, key: str, on_step=None) -> str:
     return "\n\n".join(out)
 
 
-def make_summary(text: str, title: str, length: str, key: str, on_step=None) -> str:
+DEFAULT_TASK = ("Write a clear English summary of this talk. Plain prose, no "
+                "marketing language. Cover the main themes, the line of reasoning, "
+                "and anything notable that was said, for someone who will not "
+                "watch the video.")
+
+
+def make_output(text: str, title: str, length: str, key: str,
+                instruction: str = "", on_step=None) -> str:
+    """Default me summary. Instruction di ho to wahi kaam hota hai —
+    mukhya bindu, notes, sawaal-jawaab, lekh, jo bhi kaha jaye."""
+    task = (instruction or "").strip() or DEFAULT_TASK
     target = {"short": "about 150 words",
               "medium": "about 350 words",
               "detailed": "about 700 words"}.get(length, "about 350 words")
-    system = ("You write clear English summaries of spoken discourses and talks. "
-              "Plain prose, no marketing language, no bullet-point padding. "
-              "Cover the main themes, the line of reasoning, and anything notable "
-              "that was said. Write for someone who will not watch the video.")
+    system = ("You work on transcripts of spoken talks and produce exactly what "
+              "the user asks for, in English. Follow the user's instruction "
+              "closely — its wording decides the form, the focus and the tone of "
+              "what you write. Never add commentary about the instruction itself.")
     chunks = split_text(text, 30000)
     if len(chunks) == 1:
         if on_step:
-            on_step("writing the summary")
+            on_step("writing")
         return llm(system,
-                   f"Title: {title}\n\nTranscript:\n{chunks[0]}\n\n"
-                   f"Write a summary of {target}.", key, max_tokens=3000)
+                   f"Title: {title}\n\nInstruction: {task}\n"
+                   f"Length: aim for {target} unless the instruction says otherwise."
+                   f"\n\nTranscript:\n{chunks[0]}", key, max_tokens=3500)
     notes = []
-    for i, ch in enumerate(chunks, 1):
+    total = len(chunks)
+    for i in range(total):
         if on_step:
-            on_step(f"reading for the summary ({i}/{len(chunks)})")
+            on_step(f"reading ({i + 1}/{total})")
         notes.append(llm(system,
-                         f"Part {i} of {len(chunks)} of a transcript:\n{ch}\n\n"
-                         "List the substantive points made in this part.",
+                         f"Part {i + 1} of {total} of a transcript. The final task "
+                         f"will be: {task}\n\nList everything from this part that "
+                         f"the final task will need.\n\n{chunks[i]}",
                          key, max_tokens=1500))
+        chunks[i] = ""
+        gc.collect()
     if on_step:
-        on_step("putting the summary together")
+        on_step("putting it together")
     return llm(system,
-               f"Title: {title}\n\nNotes from the full transcript:\n\n"
-               + "\n\n".join(notes)
-               + f"\n\nWrite one continuous summary of {target}.",
-               key, max_tokens=3000)
+               f"Title: {title}\n\nInstruction: {task}\n"
+               f"Length: aim for {target} unless the instruction says otherwise."
+               f"\n\nNotes from the full transcript:\n\n" + "\n\n".join(notes),
+               key, max_tokens=3500)
 
 
 # ------------------------------------------------------------------ PDF
@@ -443,7 +502,8 @@ def memory_mb():
     return 0
 
 
-def build_pdf(title, channel, date_str, link, episode, summary, transcript) -> bytes:
+def build_pdf(title, channel, date_str, link, episode, summary, transcript,
+              heading="Summary") -> bytes:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import mm
@@ -483,7 +543,7 @@ def build_pdf(title, channel, date_str, link, episode, summary, transcript) -> b
         Paragraph(f'<link href="{esc(link)}" color="#1F6F5C">{esc(link)}</link>', st_meta),
         Spacer(1, 6),
         HRFlowable(width="100%", thickness=0.7, color=colors.HexColor("#DBD8D0")),
-        Paragraph("Summary", st_head),
+        Paragraph(heading, st_head),
     ]
     for para in [p for p in summary.split("\n") if p.strip()]:
         story.append(Paragraph(esc(para.strip()), st_body))
@@ -527,7 +587,8 @@ def clear_state(video_id, existing):
 
 # ------------------------------------------------------------------ one video
 
-def process_video(video, channel_name, s, recipients, episode_no, serial_no):
+def process_video(video, channel_name, s, recipients, episode_no, serial_no,
+                  tab="Episodes", instruction=None):
     def step(msg):
         STATUS["step"] = f"{video['title'][:50]} — {msg}"
 
@@ -541,16 +602,18 @@ def process_video(video, channel_name, s, recipients, episode_no, serial_no):
     step("translating to English")
     english = to_english(raw, key, on_step=lambda m: step(m))
 
-    step("writing summary")
-    summary = make_summary(english, video["title"], s.get("summary_length", "medium"),
-                           key, on_step=lambda m: step(m))
+    task = instruction if instruction is not None else s.get("output_instruction", "")
+    heading = (s.get("output_title") or "Summary").strip() or "Summary"
+    step("writing")
+    summary = make_output(english, video["title"], s.get("summary_length", "medium"),
+                          key, instruction=task, on_step=lambda m: step(m))
 
     date_local = video["published"].astimezone()
     date_str = date_local.strftime("%d %b %Y")
 
     step("building PDF")
     pdf = build_pdf(video["title"], channel_name, date_str, video["link"],
-                    episode_no, summary, english)
+                    episode_no, summary, english, heading=heading)
 
     step("saving to Drive")
     safe = re.sub(r"[^\w\s-]", "", video["title"])[:70].strip() or video["video_id"]
@@ -566,7 +629,7 @@ def process_video(video, channel_name, s, recipients, episode_no, serial_no):
     except Exception:
         subject = video["title"]
     body = (f"{video['title']}\n{channel_name} · {date_str}\n{video['link']}\n\n"
-            f"Summary\n\n{summary}\n\n"
+            f"{heading}\n\n{summary}\n\n"
             f"Full transcript is in the attached PDF.\n")
     if recipients:
         gapi.send_mail(recipients, subject, body, attachment=pdf, attachment_name=fname)
@@ -582,7 +645,7 @@ def process_video(video, channel_name, s, recipients, episode_no, serial_no):
         sheet_transcript = parts[0] + "\n\n[… rest is in the Overflow tab; the full text is in the PDF]"
         gapi.append_rows("Overflow",
                          [[video["video_id"], i + 1, p] for i, p in enumerate(parts[1:], 1)])
-    gapi.append_row("Episodes", [
+    gapi.append_row(tab, [
         serial_no, date_str, episode_no, video["link"], up["link"],
         sheet_transcript, summary, video["title"], channel_name,
         video["video_id"], ", ".join(recipients),
@@ -681,6 +744,33 @@ def run_check(manual=False):
                                 f"transcript.\nReason: {e}\n")
                         except Exception:
                             pass
+
+        # --- pasted links pehle
+        pending = [q for q in data.get("queue", [])
+                   if q.get("Video Link")
+                   and (q.get("Status") or "").lower() not in ("done", "skip", "error")]
+        link_serial = len(data.get("links", []))
+        for q in pending[:2]:
+            vid = extract_video_id(q["Video Link"])
+            if not vid:
+                gapi.write_range("Queue", f"D{q['_row']}", [["error: not a video link"]])
+                failed += 1
+                continue
+            try:
+                STATUS["step"] = "reading pasted link"
+                v = video_meta(vid)
+                to = [x.strip() for x in (q.get("Emails") or "").replace(";", ",").split(",")
+                      if "@" in x] or recipients
+                link_serial += 1
+                process_video(v, v["channel"], s, to, "", link_serial, tab="Links",
+                              instruction=q.get("Instruction") or None)
+                gapi.write_range("Queue", f"D{q['_row']}", [["done"]])
+                done += 1
+                gc.collect()
+            except Exception as ex:
+                gapi.write_range("Queue", f"D{q['_row']}", [[f"error: {str(ex)[:120]}"]])
+                log("error", f"link {q['Video Link']}: {ex}")
+                failed += 1
 
         parts = []
         if done:
