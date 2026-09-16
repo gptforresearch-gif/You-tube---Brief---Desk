@@ -18,7 +18,7 @@ import gc
 
 import gapi
 
-BUILD = "7"
+BUILD = "8"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -50,7 +50,8 @@ STATUS = {
     "step": "",
     "started": "",
     "last_run": "",
-    "last_result": "Abhi tak chala nahi.",
+    "last_result": "Not run yet.",
+    "did_work": False,
 }
 _run_lock = threading.Lock()
 
@@ -139,9 +140,9 @@ def resolve_channel(text: str):
         try:
             return resolve_channel_supadata(url, supadata_key())
         except Exception:
-            raise RuntimeError("Is link se channel ID nahi mili. YouTube par channel "
-                               "kholiye, 'Share channel' > 'Copy channel ID' se "
-                               "UC... wali ID lijiye aur wahi yahan daaliye.")
+            raise RuntimeError("Could not find the channel ID from that link. Open the channel on YouTube, "
+                               "use 'Share channel' > 'Copy channel ID' to get the "
+                               "UC... id, and paste that here.")
     cid = m.group(1)
     name = ""
     t = re.search(r'<meta property="og:title" content="([^"]+)"', r.text)
@@ -199,7 +200,7 @@ def fetch_feed_rss(cid: str) -> dict:
 
 def _sup_get(path, params, key, timeout=60):
     if not key:
-        raise RuntimeError("Supadata key nahi dali gayi.")
+        raise RuntimeError("No Supadata key set.")
     r = requests.get(f"https://api.supadata.ai{path}", params=params,
                      headers={"x-api-key": key}, timeout=timeout)
     if r.status_code >= 400:
@@ -237,7 +238,7 @@ def fetch_feed_supadata(cid: str, key: str) -> dict:
             "link": f"https://www.youtube.com/watch?v={vid}",
         })
     if not videos:
-        raise RuntimeError("Supadata se bhi koi video nahi mila.")
+        raise RuntimeError("Supadata returned no videos either.")
     videos.sort(key=lambda x: x["published"], reverse=True)
     return {"channel": channel_name, "videos": videos}
 
@@ -246,7 +247,7 @@ def resolve_channel_supadata(text: str, key: str):
     data = _sup_get("/v1/youtube/channel", {"id": text}, key)
     cid = data.get("id") or data.get("channelId") or ""
     if not cid.startswith("UC"):
-        raise RuntimeError("Channel ID nahi mili.")
+        raise RuntimeError("Channel ID not found.")
     return cid, data.get("name") or data.get("title") or cid
 
 
@@ -273,7 +274,7 @@ def transcript_direct(video_id: str):
 def transcript_supadata(video_id: str, key: str):
     """Caption ho to caption, na ho to Supadata khud audio se bana deta hai."""
     if not key:
-        raise RuntimeError("Supadata key Settings me nahi dali gayi hai.")
+        raise RuntimeError("No Supadata key in Settings.")
     headers = {"x-api-key": key}
     watch = f"https://www.youtube.com/watch?v={video_id}"
     attempts = [
@@ -288,9 +289,9 @@ def transcript_supadata(video_id: str, key: str):
             last_error = str(e)
             continue
         if r.status_code in (401, 403):
-            raise RuntimeError(f"Supadata ne mana kiya ({r.status_code}). Key jaanchiye.")
+            raise RuntimeError(f"Supadata refused ({r.status_code}). Check the key.")
         if r.status_code == 429:
-            raise RuntimeError("Supadata ke is mahine ke credits khatam ho gaye.")
+            raise RuntimeError("Supadata credits for this month are used up.")
         if r.status_code >= 400:
             last_error = f"{r.status_code} {r.text[:200]}"
             continue
@@ -302,7 +303,7 @@ def transcript_supadata(video_id: str, key: str):
         if text:
             return text
         last_error = str(data)[:200]
-    raise RuntimeError(f"Transcript nahi mila. {last_error}")
+    raise RuntimeError(f"No transcript. {last_error}")
 
 
 def supadata_wait(job_id: str, headers, max_wait=600):
@@ -319,8 +320,8 @@ def supadata_wait(job_id: str, headers, max_wait=600):
         if status in ("completed", "complete", "succeeded", "done") or data.get("content"):
             return data
         if status in ("failed", "error"):
-            raise RuntimeError(f"Supadata ka kaam fail hua: {data.get('error', '')}")
-    raise RuntimeError("Supadata se jawab aane me bahut der lag gayi.")
+            raise RuntimeError(f"Supadata job failed: {data.get('error', '')}")
+    raise RuntimeError("Supadata took too long to answer.")
 
 
 def supadata_text(data) -> str:
@@ -360,7 +361,7 @@ def llm(system: str, user: str, key: str, max_tokens=4000, tries=3):
             r = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=180)
             if r.status_code == 429:
                 time.sleep(15 * (i + 1))
-                last = "OpenRouter ne thoda ruk kar aane ko kaha (429)."
+                last = "OpenRouter asked us to slow down (429)."
                 continue
             if r.status_code >= 400:
                 last = f"OpenRouter {r.status_code}: {r.text[:200]}"
@@ -371,7 +372,7 @@ def llm(system: str, user: str, key: str, max_tokens=4000, tries=3):
         except Exception as e:
             last = str(e)
             time.sleep(5)
-    raise RuntimeError(f"OpenRouter se jawab nahi aaya. {last}")
+    raise RuntimeError(f"No answer from OpenRouter. {last}")
 
 
 def to_english(text: str, key: str, on_step=None) -> str:
@@ -386,7 +387,7 @@ def to_english(text: str, key: str, on_step=None) -> str:
     total = len(chunks)
     for i in range(total):
         if on_step:
-            on_step(f"English me badal raha hoon ({i + 1}/{total})")
+            on_step(f"translating to English ({i + 1}/{total})")
         out.append(llm(system, chunks[i], key, max_tokens=8000))
         chunks[i] = ""
         gc.collect()
@@ -404,20 +405,20 @@ def make_summary(text: str, title: str, length: str, key: str, on_step=None) -> 
     chunks = split_text(text, 30000)
     if len(chunks) == 1:
         if on_step:
-            on_step("Summary bana raha hoon")
+            on_step("writing the summary")
         return llm(system,
                    f"Title: {title}\n\nTranscript:\n{chunks[0]}\n\n"
                    f"Write a summary of {target}.", key, max_tokens=3000)
     notes = []
     for i, ch in enumerate(chunks, 1):
         if on_step:
-            on_step(f"Summary ke liye padh raha hoon ({i}/{len(chunks)})")
+            on_step(f"reading for the summary ({i}/{len(chunks)})")
         notes.append(llm(system,
                          f"Part {i} of {len(chunks)} of a transcript:\n{ch}\n\n"
                          "List the substantive points made in this part.",
                          key, max_tokens=1500))
     if on_step:
-        on_step("Summary jod raha hoon")
+        on_step("putting the summary together")
     return llm(system,
                f"Title: {title}\n\nNotes from the full transcript:\n\n"
                + "\n\n".join(notes)
@@ -532,32 +533,32 @@ def process_video(video, channel_name, s, recipients, episode_no, serial_no):
 
     key = openrouter_key(s)
     if not key:
-        raise RuntimeError("OpenRouter key Settings me daaliye.")
+        raise RuntimeError("Add your OpenRouter key in Settings.")
 
-    step("transcript la raha hoon")
+    step("fetching transcript")
     raw, source = get_transcript(video["video_id"], s)
 
-    step("English me badal raha hoon")
+    step("translating to English")
     english = to_english(raw, key, on_step=lambda m: step(m))
 
-    step("summary bana raha hoon")
+    step("writing summary")
     summary = make_summary(english, video["title"], s.get("summary_length", "medium"),
                            key, on_step=lambda m: step(m))
 
     date_local = video["published"].astimezone()
     date_str = date_local.strftime("%d %b %Y")
 
-    step("PDF bana raha hoon")
+    step("building PDF")
     pdf = build_pdf(video["title"], channel_name, date_str, video["link"],
                     episode_no, summary, english)
 
-    step("Drive me rakh raha hoon")
+    step("saving to Drive")
     safe = re.sub(r"[^\w\s-]", "", video["title"])[:70].strip() or video["video_id"]
     fname = f"{date_local.strftime('%Y-%m-%d')} - {safe}.pdf"
     up = gapi.upload_pdf(fname, pdf, date_local.strftime("%Y-%m"),
                          public=s.get("pdf_public", "yes") == "yes")
 
-    step("email bhej raha hoon")
+    step("sending email")
     try:
         subject = s.get("email_subject", "{title}").format(
             title=video["title"], channel=channel_name, date=date_str,
@@ -574,11 +575,11 @@ def process_video(video, channel_name, s, recipients, episode_no, serial_no):
     del pdf
     gc.collect()
 
-    step("Sheet me likh raha hoon")
+    step("writing to the Sheet")
     sheet_transcript = english
     if len(english) > CELL_LIMIT:
         parts = [english[i:i + CELL_LIMIT] for i in range(0, len(english), CELL_LIMIT)]
-        sheet_transcript = parts[0] + "\n\n[… baaki hissa Overflow tab me, pura PDF me hai]"
+        sheet_transcript = parts[0] + "\n\n[… rest is in the Overflow tab; the full text is in the PDF]"
         gapi.append_rows("Overflow",
                          [[video["video_id"], i + 1, p] for i, p in enumerate(parts[1:], 1)])
     gapi.append_row("Episodes", [
@@ -586,7 +587,7 @@ def process_video(video, channel_name, s, recipients, episode_no, serial_no):
         sheet_transcript, summary, video["title"], channel_name,
         video["video_id"], ", ".join(recipients),
     ])
-    log("ok", f"Bhej diya: {video['title']} (transcript: {source})")
+    log("ok", f"Sent: {video['title']} (transcript via {source})")
     return up["link"]
 
 
@@ -594,17 +595,18 @@ def process_video(video, channel_name, s, recipients, episode_no, serial_no):
 
 def run_check(manual=False):
     if not _run_lock.acquire(blocking=False):
-        return "Pehle wala kaam abhi chal raha hai."
-    STATUS.update({"running": True, "step": "shuru kar raha hoon",
+        return "A run is already in progress."
+    STATUS.update({"running": True, "step": "starting",
                    "started": now_str()})
     done, failed, skipped = 0, 0, 0
+    STATUS["did_work"] = False
     try:
         gapi.ensure_tabs()
         data = gapi.read_all(force=True)
         s = dict(DEFAULTS)
         s.update(data["settings"])
         if s.get("paused") == "yes" and not manual:
-            STATUS["last_result"] = "Rok lagi hui hai (Settings me)."
+            STATUS["last_result"] = "Paused in Settings."
             return STATUS["last_result"]
 
         channels = [c for c in data["channels"]
@@ -612,7 +614,7 @@ def run_check(manual=False):
         recipients = [r["Email"].strip() for r in data["recipients"]
                       if r.get("Email") and r.get("Active", "yes") != "no"]
         if not channels:
-            STATUS["last_result"] = "Koi channel joda hi nahi gaya."
+            STATUS["last_result"] = "No channels added."
             return STATUS["last_result"]
 
         episodes = data["episodes"]
@@ -631,11 +633,11 @@ def run_check(manual=False):
         for ch in channels:
             cid = ch["Channel ID"].strip()
             name = ch.get("Name") or cid
-            STATUS["step"] = f"{name} ka feed dekh raha hoon"
+            STATUS["step"] = f"checking {name}"
             try:
                 feed = fetch_feed(cid)
             except Exception as e:
-                log("error", f"{name}: feed nahi khula — {e}")
+                log("error", f"{name}: could not read the feed — {e}")
                 failed += 1
                 continue
 
@@ -645,7 +647,7 @@ def run_check(manual=False):
 
             for v in fresh:
                 if done >= 1:
-                    STATUS["step"] = "ek video ho gaya, baaki agli baari me"
+                    STATUS["step"] = "one video done, the rest next time"
                     break
                 st = states.get(v["video_id"])
                 if st and str(st.get("Attempts")) == "done":
@@ -669,28 +671,29 @@ def run_check(manual=False):
                     states = state_map()
                     failed += 1
                     log("wait" if attempts < MAX_ATTEMPTS else "error",
-                        f"{v['title'][:60]} — {e} (koshish {attempts})")
+                        f"{v['title'][:60]} — {e} (attempt {attempts})")
                     if attempts == MAX_ATTEMPTS and recipients:
                         try:
                             gapi.send_mail(
                                 recipients[:1],
-                                f"Transcript nahi mila: {v['title'][:60]}",
-                                f"{v['link']}\n\nDo din koshish ki, transcript nahi "
-                                f"mila.\nVajah: {e}\n")
+                                f"No transcript: {v['title'][:60]}",
+                                f"{v['link']}\n\nTried for two days, still no "
+                                f"transcript.\nReason: {e}\n")
                         except Exception:
                             pass
 
         parts = []
         if done:
-            parts.append(f"{done} video bheje")
+            parts.append(f"{done} sent")
         if failed:
-            parts.append(f"{failed} par ruke")
+            parts.append(f"{failed} stalled")
         if skipped:
-            parts.append(f"{skipped} chhode")
-        STATUS["last_result"] = (", ".join(parts) or "Kuch naya nahi mila") + "."
+            parts.append(f"{skipped} skipped")
+        STATUS["did_work"] = done > 0
+        STATUS["last_result"] = (", ".join(parts) or "Nothing new") + "."
         return STATUS["last_result"]
     except Exception as e:
-        STATUS["last_result"] = f"Gadbad: {e}"
+        STATUS["last_result"] = f"Problem: {e}"
         log("error", f"run: {e}")
         return STATUS["last_result"]
     finally:

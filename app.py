@@ -21,14 +21,14 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
-BUILD = "7"
+BUILD = "8"
 
 
 # ---------------------------------------------------------------- background
-# Do kaam app ke andar hi chalte hain:
-#   1. har 10 minute apne aap ko ping — Render free plan sulaata nahi
-#   2. har kuch ghante (Settings: check_every_hours) naye video ki jaanch
-# Isliye na cron-job.org chahiye, na khulne me 50 second.
+# Two things run inside the app itself:
+#   1. a self-ping every 12 minutes, so Render's free plan never sleeps it
+#   2. a check for new videos every few hours (Settings: check_every_hours)
+# So no external cron service is needed.
 
 import time
 import threading
@@ -54,7 +54,7 @@ def _keepalive_loop():
 
 
 def _scheduler_loop():
-    time.sleep(600)                      # pehle UI khulne dijiye, phir kaam
+    time.sleep(180)                      # let the UI come up first
     while True:
         hours = 3.0
         try:
@@ -65,14 +65,19 @@ def _scheduler_loop():
                 pipeline.run_in_background()
         except Exception as ex:
             print("[scheduler]", ex, flush=True)
-        hours = max(0.5, min(hours, 24))
-        nxt = dt.datetime.now() + dt.timedelta(hours=hours)
+        hours = max(0.25, min(hours, 24))
+        # agar abhi kaam mila tha to jaldi laut kar aao — ek baari me ek video
+        wait = 0.2 if pipeline.STATUS.get("did_work") else hours
+        nxt = dt.datetime.now() + dt.timedelta(hours=wait)
         SCHED["next_check"] = nxt.strftime("%d %b, %I:%M %p")
-        time.sleep(hours * 3600)
+        time.sleep(wait * 3600)
+
+
+AUTO = os.environ.get("DISABLE_BACKGROUND") != "1"
 
 
 def start_background():
-    if os.environ.get("DISABLE_BACKGROUND") == "1":
+    if not AUTO:
         return
     threading.Thread(target=_keepalive_loop, daemon=True).start()
     threading.Thread(target=_scheduler_loop, daemon=True).start()
@@ -199,15 +204,15 @@ def login():
             session["ok"] = True
             session.permanent = True
             return redirect("/")
-        return page("Login", "<h2>Password</h2><p class='sub'>Galat password.</p>"
+        return page("Login", "<h2>Password</h2><p class='sub'>Wrong password.</p>"
                     + LOGIN_FORM)
     return page("Login", "<h2>YouTube Brief Desk</h2>"
-                "<p class='sub'>Andar aane ke liye password daaliye.</p>" + LOGIN_FORM)
+                "<p class='sub'>Enter your password to continue.</p>" + LOGIN_FORM)
 
 
 LOGIN_FORM = """<form method="post" class="card" style="max-width:340px">
 <label>Password</label><input type="password" name="password" autofocus>
-<div style="margin-top:14px"><button class="btn">Kholiye</button></div></form>"""
+<div style="margin-top:14px"><button class="btn">Open</button></div></form>"""
 
 
 @app.route("/logout")
@@ -230,7 +235,7 @@ def dashboard():
         recips = [r for r in data["recipients"] if r.get("Active", "yes") != "no"]
     except Exception as ex:
         return page("Dashboard", f"<h2>Dashboard</h2><div class='msg bad'>"
-                    f"Google se baat nahi ho paayi: {e(ex)}</div>", "/")
+                    f"Could not reach Google: {e(ex)}</div>", "/")
 
     s = data["settings"]
     st = pipeline.STATUS
@@ -238,49 +243,50 @@ def dashboard():
 
     if latest:
         lead = f"""<div class="card lead">
-          <div class="note">Sabse naya · {e(latest.get('Date'))}</div>
+          <div class="note">Latest · {e(latest.get('Date'))}</div>
           <h3 style="margin:6px 0 10px;font:600 19px/1.3 Georgia,serif">{e(latest.get('Title'))}</h3>
           <div class="summary" style="color:#3A4152">{e((latest.get('Summary') or '')[:420])}…</div>
           <div class="row" style="margin-top:14px">
-            <a class="btn small" href="{e(latest.get('PDF'))}" target="_blank">PDF kholiye</a>
+            <a class="btn small" href="{e(latest.get('PDF'))}" target="_blank">Open PDF</a>
             <a class="btn small ghost" href="{e(latest.get('Video Link'))}" target="_blank">Video</a>
-            <a class="btn small ghost" href="/library">Sab dekhiye</a>
+            <a class="btn small ghost" href="/library">See all</a>
           </div></div>"""
     else:
-        lead = ("<div class='card lead'><h3 style='margin:0 0 6px'>Abhi kuch nahi aaya</h3>"
-                "<p class='note' style='margin:0'>Ek channel jodiye aur ek email pata "
-                "daaliye — agla video aate hi kaam shuru ho jayega.</p>"
+        lead = ("<div class='card lead'><h3 style='margin:0 0 6px'>Nothing yet</h3>"
+                "<p class='note' style='margin:0'>Add a channel and an email address — "
+                "the next video will be picked up automatically.</p>"
                 "<div class='row' style='margin-top:14px'>"
-                "<a class='btn small' href='/channels'>Channel jodiye</a></div></div>")
+                "<a class='btn small' href='/channels'>Add a channel</a></div></div>")
 
     running = st["running"]
-    state = (f"<span class='dot'></span>{e(st['step']) or 'chal raha hai'}"
+    state = (f"<span class='dot'></span>{e(st['step']) or 'working'}"
              if running else
              f"<span class='dot idle'></span>{e(st['last_result'])}")
 
-    body = f"""<h2>Dashboard</h2><p class="sub">Aaj tak {len(eps)} episode bheje gaye.</p>
+    body = f"""<h2>Dashboard</h2><p class="sub">{len(eps)} episodes sent so far.</p>
     {lead}
     <div class="card"><div class="row" style="justify-content:space-between">
       <div id="state">{state}</div>
       <form method="post" action="/run" style="margin:0">
-        <button class="btn small" {'disabled' if running else ''}>Abhi chalao</button>
+        <button class="btn small" {'disabled' if running else ''}>Run now</button>
       </form></div>
-      <div class="note" style="margin-top:10px">Pichhli baar: {e(st['last_run'] or '—')}
-        &nbsp;·&nbsp; Agli jaanch: {e(SCHED['next_check'] or 'thodi der me')}
-        &nbsp;·&nbsp; {'Jaagti rahegi' if SCHED['keep_awake'] else 'Beech me so sakti hai'}</div>
+      <div class="note" style="margin-top:10px">Auto: {'on' if AUTO else 'OFF — remove DISABLE_BACKGROUND in Render'}
+        &nbsp;·&nbsp; Last run: {e(st['last_run'] or '—')}
+        &nbsp;·&nbsp; Next check: {e(SCHED['next_check'] or 'shortly')}
+        &nbsp;·&nbsp; {'Staying awake' if SCHED['keep_awake'] else 'May sleep'}</div>
     </div>
     <div class="grid">
       <div class="card"><div class="note">Channels</div>
         <div style="font:600 22px/1.4 Georgia,serif">{len(chans)}</div>
-        <a class="note" href="/channels">badliye</a></div>
-      <div class="card"><div class="note">Email jaata hai</div>
-        <div style="font:600 22px/1.4 Georgia,serif">{len(recips)} log</div>
-        <a class="note" href="/recipients">badliye</a></div>
+        <a class="note" href="/channels">change</a></div>
+      <div class="card"><div class="note">Emails go to</div>
+        <div style="font:600 22px/1.4 Georgia,serif">{len(recips)} people</div>
+        <a class="note" href="/recipients">change</a></div>
     </div>
-    <div class="card"><div class="note" style="margin-bottom:8px">Aapka record</div>
+    <div class="card"><div class="note" style="margin-bottom:8px">Your records</div>
       <div class="row">
         <a class="btn small ghost" href="{e(safe_sheet_url())}" target="_blank">Google Sheet</a>
-        <a class="btn small ghost" href="{e(safe_drive_url())}" target="_blank">Drive folder (PDF)</a>
+        <a class="btn small ghost" href="{e(safe_drive_url())}" target="_blank">Drive folder (PDFs)</a>
       </div></div>
     <script>
     setInterval(async () => {{
@@ -315,13 +321,13 @@ def api_status():
 @app.route("/run", methods=["POST"])
 def run_now():
     started = pipeline.run_in_background(manual=True)
-    return back("/", "Kaam shuru kar diya." if started else "Pehle se chal raha hai.")
+    return back("/", "Started." if started else "Already running.")
 
 
 @app.route("/cron")
 def cron():
     if CRON_KEY and request.args.get("key") != CRON_KEY:
-        return Response("nahi", status=403)
+        return Response("no", status=403)
     started = pipeline.run_in_background()
     return jsonify({"started": started, "status": pipeline.STATUS})
 
@@ -337,15 +343,15 @@ def channels():
             if action == "add":
                 cid, name = pipeline.resolve_channel(request.form.get("channel", ""))
                 if any(r["Channel ID"] == cid for r in rows):
-                    return back("/channels", "Yeh channel pehle se juda hai.", True)
+                    return back("/channels", "That channel is already added.", True)
                 gapi.append_row("Channels", [cid, name,
                                              dt.date.today().strftime("%d %b %Y"), "yes"])
-                return back("/channels", f"{name} jud gaya.")
+                return back("/channels", f"{name} added.")
             if action == "delete":
                 keep = [[r.get("Channel ID"), r.get("Name"), r.get("Added On"), r.get("Active")]
                         for r in rows if r.get("Channel ID") != request.form.get("cid")]
                 gapi.replace_tab("Channels", gapi.TABS["Channels"], keep)
-                return back("/channels", "Hata diya.")
+                return back("/channels", "Removed.")
         except Exception as ex:
             return back("/channels", f"Nahi ho paya: {ex}", True)
 
@@ -356,18 +362,18 @@ def channels():
         <td style="text-align:right"><form method="post" style="margin:0">
         <input type="hidden" name="action" value="delete">
         <input type="hidden" name="cid" value="{e(r.get('Channel ID'))}">
-        <button class="btn small ghost">Hatao</button></form></td></tr>""" for r in rows)
+        <button class="btn small ghost">Remove</button></form></td></tr>""" for r in rows)
     body = f"""<h2>Channels</h2>
-    <p class="sub">Jin channels par nazar rakhni hai.</p>
+    <p class="sub">Channels being watched.</p>
     <div class="card"><form method="post">
       <input type="hidden" name="action" value="add">
-      <label>Channel ka link, @handle ya UC… se shuru hone wali ID</label>
+      <label>Channel link, @handle, or the UC… channel ID</label>
       <input name="channel" placeholder="https://www.youtube.com/@channelname" required>
-      <div style="margin-top:13px"><button class="btn">Jodiye</button></div>
+      <div style="margin-top:13px"><button class="btn">Add</button></div>
     </form></div>
-    {'<div class="card"><table><tr><th>Channel</th><th>Kab se</th><th></th></tr>'
+    {'<div class="card"><table><tr><th>Channel</th><th>Added</th><th></th></tr>'
      + trs + '</table></div>' if rows else
-     '<p class="note">Abhi koi channel nahi juda.</p>'}"""
+     '<p class="note">No channels yet.</p>'}"""
     return page("Channels", body, "/channels")
 
 
@@ -380,31 +386,31 @@ def recipients():
         if request.form.get("action") == "add":
             email = (request.form.get("email") or "").strip()
             if "@" not in email:
-                return back("/recipients", "Yeh email pata theek nahi lag raha.", True)
+                return back("/recipients", "That email address does not look right.", True)
             gapi.append_row("Recipients", [email, request.form.get("name", ""), "yes"])
-            return back("/recipients", "Jod diya.")
+            return back("/recipients", "Added.")
         keep = [[r.get("Email"), r.get("Name"), r.get("Active")]
                 for r in rows if r.get("Email") != request.form.get("email")]
         gapi.replace_tab("Recipients", gapi.TABS["Recipients"], keep)
-        return back("/recipients", "Hata diya.")
+        return back("/recipients", "Removed.")
 
     rows = gapi.read_all()["recipients"]
     trs = "".join(f"""<tr><td>{e(r.get('Email'))}<div class="note">{e(r.get('Name'))}</div></td>
         <td style="text-align:right"><form method="post" style="margin:0">
         <input type="hidden" name="action" value="delete">
         <input type="hidden" name="email" value="{e(r.get('Email'))}">
-        <button class="btn small ghost">Hatao</button></form></td></tr>""" for r in rows)
+        <button class="btn small ghost">Remove</button></form></td></tr>""" for r in rows)
     body = f"""<h2>Recipients</h2>
-    <p class="sub">Har naye video ki PDF in sab ko jaayegi.</p>
+    <p class="sub">Every new video's PDF goes to these people.</p>
     <div class="card"><form method="post">
       <input type="hidden" name="action" value="add">
       <div class="grid"><div><label>Email</label>
         <input name="email" type="email" placeholder="naam@example.com" required></div>
-        <div><label>Naam (marzi ho to)</label><input name="name"></div></div>
-      <div style="margin-top:13px"><button class="btn">Jodiye</button></div>
+        <div><label>Name (optional)</label><input name="name"></div></div>
+      <div style="margin-top:13px"><button class="btn">Add</button></div>
     </form></div>
     {'<div class="card"><table>' + trs + '</table></div>' if rows else
-     '<p class="note">Abhi kisi ka pata nahi daala gaya.</p>'}"""
+     '<p class="note">No recipients yet.</p>'}"""
     return page("Recipients", body, "/recipients")
 
 
@@ -427,14 +433,14 @@ def library():
             <a class="btn small ghost" href="{e(r.get('Video Link'))}" target="_blank">Video</a>
             <form method="post" action="/resend" style="margin:0">
               <input type="hidden" name="row" value="{r['_row']}">
-              <button class="btn small ghost">Dobara email</button></form>
+              <button class="btn small ghost">Email again</button></form>
           </div></td></tr>""" for r in rows[:200])
-    body = f"""<h2>Library</h2><p class="sub">{len(rows)} episode.</p>
+    body = f"""<h2>Library</h2><p class="sub">{len(rows)} episodes.</p>
     <form class="card" method="get"><div class="row">
-      <input name="q" value="{e(q)}" placeholder="title ya summary me dhoondhiye"
-        style="flex:1;min-width:200px"><button class="btn">Dhoondhiye</button></div></form>
+      <input name="q" value="{e(q)}" placeholder="search title or summary"
+        style="flex:1;min-width:200px"><button class="btn">Search</button></div></form>
     {'<div class="card"><table>' + trs + '</table></div>' if rows else
-     '<p class="note">Kuch nahi mila.</p>'}"""
+     '<p class="note">Nothing found.</p>'}"""
     return page("Library", body, "/library")
 
 
@@ -447,16 +453,16 @@ def resend():
         to = [r["Email"] for r in data["recipients"]
               if r.get("Email") and r.get("Active", "yes") != "no"]
         if not to:
-            return back("/library", "Kisi ka email pata nahi mila.", True)
+            return back("/library", "No recipients found.", True)
         fid = gapi.file_id_from_link(row.get("PDF", ""))
         pdf = gapi.download_file(fid) if fid else None
         body = (f"{row.get('Title')}\n{row.get('Channel')} · {row.get('Date')}\n"
                 f"{row.get('Video Link')}\n\nSummary\n\n{row.get('Summary')}\n")
         gapi.send_mail(to, row.get("Title", "Brief"), body, attachment=pdf,
                        attachment_name="brief.pdf")
-        return back("/library", "Dobara bhej diya.")
+        return back("/library", "Sent again.")
     except Exception as ex:
-        return back("/library", f"Nahi bheja ja saka: {ex}", True)
+        return back("/library", f"Could not send: {ex}", True)
 
 
 # ---------------------------------------------------------------- settings
@@ -478,40 +484,40 @@ def settings_page():
             "supadata_key": request.form.get("supadata_key", "").strip(),
         })
         SCHED["keep_awake"] = bool(request.form.get("keep_awake"))
-        return back("/settings", "Sambhaal liya.")
+        return back("/settings", "Saved.")
 
     s = pipeline.settings()
     sel = lambda v: "selected" if s.get("summary_length") == v else ""
-    body = f"""<h2>Settings</h2><p class="sub">Google se juda hua account:
+    body = f"""<h2>Settings</h2><p class="sub">Connected Google account:
       {e(gapi.account_email())}</p>
     <form method="post">
     <div class="card">
       <div class="grid">
-        <div><label>Summary kitni lambi</label>
+        <div><label>Summary length</label>
           <select name="summary_length">
-            <option value="short" {sel('short')}>Chhoti (~150 shabd)</option>
-            <option value="medium" {sel('medium')}>Theek-thaak (~350 shabd)</option>
-            <option value="detailed" {sel('detailed')}>Vistaar se (~700 shabd)</option>
+            <option value="short" {sel('short')}>Short (~150 words)</option>
+            <option value="medium" {sel('medium')}>Medium (~350 words)</option>
+            <option value="detailed" {sel('detailed')}>Detailed (~700 words)</option>
           </select></div>
-        <div><label>Kitne din peechhe tak dekhe</label>
+        <div><label>Look back how many days</label>
           <input name="lookback_days" value="{e(s.get('lookback_days'))}"></div>
-        <div><label>Kitne ghante me naye video dekhe</label>
+        <div><label>Check for new videos every (hours)</label>
           <input name="check_every_hours" value="{e(s.get('check_every_hours', '3'))}"></div>
       </div>
-      <label>Email ka subject</label>
+      <label>Email subject</label>
       <input name="email_subject" value="{e(s.get('email_subject'))}">
       <div class="note" style="margin-top:5px">
-        {{title}}, {{channel}}, {{date}}, {{episode}} — inki jagah asli baat aa jaayegi.</div>
+        {{title}}, {{channel}}, {{date}}, {{episode}} — these are replaced with the real values.</div>
       <label style="margin-top:16px">
         <input type="checkbox" name="pdf_public" style="width:auto"
           {'checked' if s.get('pdf_public') == 'yes' else ''}>
-        PDF ka link jise mile, wo khol sake</label>
+        Anyone with the PDF link can open it</label>
       <label><input type="checkbox" name="keep_awake" style="width:auto"
           {'checked' if s.get('keep_awake', 'yes') == 'yes' else ''}>
-        App ko jaagta rakhiye (Render sulaayega nahi; mahine ke ~744 ghante lagte hain)</label>
+        Keep the app awake (Render will not sleep it; uses ~744 hours a month)</label>
       <label><input type="checkbox" name="paused" style="width:auto"
           {'checked' if s.get('paused') == 'yes' else ''}>
-        Kuch din ke liye rok dijiye</label>
+        Pause for now</label>
     </div>
     <div class="card">
       <label>OpenRouter key</label>
@@ -519,17 +525,17 @@ def settings_page():
         placeholder="sk-or-...">
       <label>Supadata key</label>
       <input name="supadata_key" value="{e(s.get('supadata_key'))}">
-      <div class="note" style="margin-top:6px">Ye dono keys Render ke environment
-        me bhi rakh sakte hain — tab yahan khali chhod dijiye.</div>
+      <div class="note" style="margin-top:6px">Both keys can also live in Render's environment
+        — leave these blank in that case.</div>
     </div>
-    <button class="btn">Sambhaaliye</button>
+    <button class="btn">Save</button>
     </form>
     <div class="card" style="margin-top:18px">
-      <div class="note">Jude hue hisse</div>
+      <div class="note">Connected</div>
       <div class="row" style="margin-top:8px">
         <a class="btn small ghost" href="{e(safe_sheet_url())}" target="_blank">Sheet</a>
         <a class="btn small ghost" href="{e(safe_drive_url())}" target="_blank">Drive</a>
-        <a class="btn small ghost" href="/oauth/start">Google dobara jodiye</a>
+        <a class="btn small ghost" href="/oauth/start">Reconnect Google</a>
         <a class="btn small ghost" href="/logout">Logout</a>
       </div>
     </div>"""
@@ -543,21 +549,21 @@ def logs():
     trs = "".join(f"""<tr><td class="note" style="white-space:nowrap">{e(r.get('Time'))}</td>
         <td><span class="{tag.get(r.get('Level'), 'tag')}">{e(r.get('Level'))}</span></td>
         <td>{e(r.get('Message'))}</td></tr>""" for r in rows)
-    body = ("<h2>Logs</h2><p class='sub'>Kya hua, kahan atka.</p>"
+    body = ("<h2>Logs</h2><p class='sub'>What happened, and where it stopped.</p>"
             + (f"<div class='card'><table>{trs}</table></div>" if rows
-               else "<p class='note'>Abhi kuch nahi.</p>"))
+               else "<p class='note'>Nothing yet.</p>"))
     return page("Logs", body, "/logs")
 
 
 # ---------------------------------------------------------------- google oauth
 
-SETUP_BODY = """<h2>Google se jodiye</h2>
-<p class="sub">Ek hi login se teen kaam honge — Sheet likhna, Drive me PDF rakhna,
-aapke Gmail se email bhejna.</p>
+SETUP_BODY = """<h2>Connect Google</h2>
+<p class="sub">One sign-in covers three things — writing the Sheet, storing PDFs in Drive,
+and sending email from your Gmail.</p>
 <div class="card">
-<p>Render me <strong>GOOGLE_CLIENT_ID</strong> aur <strong>GOOGLE_CLIENT_SECRET</strong>
-daal dene ke baad neeche wala button dabaiye.</p>
-<a class="btn" href="/oauth/start">Google se jodiye</a>
+<p>Set <strong>GOOGLE_CLIENT_ID</strong> and <strong>GOOGLE_CLIENT_SECRET</strong>
+in Render, then press the button below.</p>
+<a class="btn" href="/oauth/start">Connect Google</a>
 </div>"""
 
 
@@ -587,8 +593,8 @@ def make_flow():
 @app.route("/oauth/start")
 def oauth_start():
     if not os.environ.get("GOOGLE_CLIENT_ID"):
-        return page("Google", "<h2>Google</h2><div class='msg bad'>Pehle Render me "
-                    "GOOGLE_CLIENT_ID aur GOOGLE_CLIENT_SECRET daaliye.</div>", "/settings")
+        return page("Google", "<h2>Google</h2><div class='msg bad'>Add "
+                    "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in Render first.</div>", "/settings")
     import secrets
     verifier = secrets.token_urlsafe(64)[:96]
     session["code_verifier"] = verifier
@@ -610,15 +616,15 @@ def oauth_callback():
         creds = flow.credentials
         if not creds.refresh_token:
             return page("Google", "<h2>Google</h2><div class='msg bad'>Refresh token "
-                        "nahi mila. Google account ki permissions se app hata kar "
-                        "dobara koshish kijiye.</div>", "/settings")
+                        "was not returned. Remove this app from your Google account permissions and "
+                        "try again.</div>", "/settings")
         os.environ["GOOGLE_REFRESH_TOKEN"] = creds.refresh_token
         gapi._cache["creds"] = None
-        body = f"""<h2>Jud gaya</h2>
-        <p class="sub">Abhi kaam karne laga hai. Ek aakhri kadam baaki hai.</p>
-        <div class="card"><p>Neeche wali line Render ke <strong>Environment</strong>
-        me <strong>GOOGLE_REFRESH_TOKEN</strong> naam se chipka dijiye — warna app
-        dobara shuru hote hi ye jodna bhool jaayega.</p>
+        body = f"""<h2>Connected</h2>
+        <p class="sub">Working already. One last step.</p>
+        <div class="card"><p>Paste the line below into Render's <strong>Environment</strong>
+        as <strong>GOOGLE_REFRESH_TOKEN</strong> — otherwise the app will forget
+        this connection the next time it restarts.</p>
         <textarea rows="3" onclick="this.select()">{e(creds.refresh_token)}</textarea>
         </div><a class="btn" href="/">Dashboard</a>"""
         return page("Google", body, "/settings")
