@@ -18,7 +18,7 @@ import gc
 
 import gapi
 
-BUILD = "12"
+BUILD = "14"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -40,6 +40,11 @@ DEFAULTS = {
     "email_subject": "{title}",
     "output_instruction": "",
     "output_title": "Summary",
+    "sms_provider": "",          # "" | fast2sms | twilio
+    "fast2sms_key": "",
+    "twilio_sid": "",
+    "twilio_token": "",
+    "twilio_from": "",
     "openrouter_key": "",
     "supadata_key": "",
     "paused": "no",
@@ -111,6 +116,71 @@ def split_text(text: str, max_chars: int):
     if buf.strip():
         parts.append(buf.strip())
     return parts or [""]
+
+
+# ------------------------------------------------------------------ SMS
+
+def clean_phone(phone: str) -> dict:
+    """+91 98xx-xxxx -> {'local': '98xxxxxxxx', 'e164': '+9198xxxxxxxx'}"""
+    raw = re.sub(r"[^\d+]", "", phone or "")
+    plus = raw.startswith("+")
+    digits = re.sub(r"\D", "", raw)
+    if not plus and len(digits) == 11 and digits.startswith("0"):
+        digits = digits[1:]
+    if not plus and len(digits) == 10:
+        digits = "91" + digits
+    if plus and digits.startswith("91") and len(digits) == 12:
+        pass
+    local = digits[-10:] if digits.startswith("91") else digits
+    return {"local": local, "e164": "+" + digits, "digits": digits}
+
+
+def sms_ready(s=None) -> bool:
+    s = s or settings()
+    p = (s.get("sms_provider") or "").lower()
+    if p == "fast2sms":
+        return bool(s.get("fast2sms_key"))
+    if p == "twilio":
+        return all(s.get(k) for k in ("twilio_sid", "twilio_token", "twilio_from"))
+    return False
+
+
+def send_sms(phone: str, text: str, s=None):
+    s = s or settings()
+    p = (s.get("sms_provider") or "").lower()
+    num = clean_phone(phone)
+    if not num["digits"] or len(num["digits"]) < 10:
+        raise RuntimeError("That mobile number does not look right.")
+
+    if p == "fast2sms":
+        key = s.get("fast2sms_key", "").strip()
+        if not num["digits"].startswith("91") and len(num["local"]) != 10:
+            raise RuntimeError("Fast2SMS only sends to Indian numbers.")
+        r = requests.get("https://www.fast2sms.com/dev/bulkV2",
+                         params={"authorization": key, "route": "q",
+                                 "message": text, "numbers": num["local"],
+                                 "flash": "0"}, timeout=40)
+        ok = False
+        try:
+            ok = bool(r.json().get("return"))
+        except Exception:
+            ok = r.status_code < 400
+        if not ok:
+            raise RuntimeError(f"Fast2SMS: {r.text[:180]}")
+        return
+
+    if p == "twilio":
+        sid = s.get("twilio_sid", "").strip()
+        r = requests.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
+            auth=(sid, s.get("twilio_token", "").strip()),
+            data={"From": s.get("twilio_from", "").strip(),
+                  "To": num["e164"], "Body": text}, timeout=40)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Twilio: {r.text[:180]}")
+        return
+
+    raise RuntimeError("SMS is not set up. Add a provider in Settings.")
 
 
 # ------------------------------------------------------------------ channel

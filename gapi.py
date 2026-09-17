@@ -42,6 +42,8 @@ TABS = {
     "Queue": ["Video Link", "Added", "Emails", "Status", "Instruction", "Sheet tab",
               "Spreadsheet"],
     "Sheets": ["Name", "Spreadsheet ID", "Link", "Added"],
+    "Users": ["Email", "Name", "Phone", "Gender", "Address", "Role", "Status",
+              "Password", "Added", "Last seen"],
     "Channels": ["Channel ID", "Name", "Added On", "Active", "Sheet tab",
                  "Spreadsheet"],
     "Recipients": ["Email", "Name", "Active"],
@@ -54,7 +56,7 @@ TABS = {
 import time as _time
 
 SYSTEM_TABS = {"Channels", "Recipients", "Settings", "State", "Overflow",
-               "Log", "Queue", "Sheets"}
+               "Log", "Queue", "Sheets", "Users"}
 MAIN = "Main"
 MAX_DATA_TABS = 12
 
@@ -261,7 +263,7 @@ def read_all(force=False):
     tabs = data_tabs()
     ranges = [
         "Channels!A2:F1000", "Recipients!A2:C1000", "Settings!A2:B300",
-        "State!A2:D5000", "Queue!A2:G2000", "Sheets!A2:D200",
+        "State!A2:D5000", "Queue!A2:G2000", "Sheets!A2:D200", "Users!A2:J500",
     ]
     base = len(ranges)
     for t in tabs:
@@ -316,6 +318,7 @@ def read_all(force=False):
         "state": rows(vr[3], TABS["State"]),
         "queue": rows(vr[4], TABS["Queue"]),
         "sheets": rows(vr[5], TABS["Sheets"]),
+        "users": rows(vr[6], TABS["Users"]),
     }
     _bundle.update({"at": _time.time(), "data": data})
     return data

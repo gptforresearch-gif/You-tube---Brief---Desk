@@ -22,7 +22,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
-BUILD = "12"
+BUILD = "14"
 
 
 # ---------------------------------------------------------------- background
@@ -172,8 +172,16 @@ SHELL = """<!doctype html><html lang="hi"><head><meta charset="utf-8">
 
 
 def page(title, body, active="/"):
+    u = current_user()
+    r = role_of(u) if u else "viewer"
+    nav = [("/", "Dashboard"), ("/library", "Library")] if r == "viewer" else list(NAV)
+    if r == "owner" and ("/users", "People") not in nav:
+        nav = nav[:-1] + [("/users", "People")] + nav[-1:]
+    elif r == "admin":
+        nav = nav[:-1] + [("/users", "People")] + nav[-1:]
+    nav = nav + [("/me", "My account")]
     return render_template_string(
-        SHELL, title=title, body=body, css=CSS, nav=NAV, active=active,
+        SHELL, title=title, body=body, css=CSS, nav=nav, active=active,
         build=BUILD, msg=request.args.get("msg"),
         bad=request.args.get("bad") == "1")
 
@@ -187,40 +195,386 @@ def e(t):
     return html.escape(str(t or ""))
 
 
+AUTH_OPEN = ("/login", "/register", "/verify", "/cron", "/static", "/oauth",
+             "/healthz", "/forgot")
+VIEWER_OK = ("/", "/library", "/logout", "/api/status", "/me")
+
+PENDING = {}          # email -> {"code", "until", "row"} — OTP ka intezaar
+OTP_MINUTES = 15
+
+
+def users():
+    try:
+        return gapi.read_all()["users"]
+    except Exception:
+        return []
+
+
+def find_user(ident):
+    ident = (ident or "").strip().lower()
+    digits = re.sub(r"\D", "", ident)
+    for u in users():
+        if (u.get("Email") or "").strip().lower() == ident:
+            return u
+        phone = re.sub(r"\D", "", u.get("Phone") or "")
+        if digits and len(digits) >= 8 and phone.endswith(digits[-10:]):
+            return u
+    return None
+
+
+def current_user():
+    if session.get("master"):
+        return {"Email": "owner", "Name": "Owner", "Role": "owner", "Status": "active"}
+    em = session.get("user")
+    if not em:
+        return None
+    for u in users():
+        if (u.get("Email") or "").strip().lower() == em:
+            return u
+    return None
+
+
+def role_of(u):
+    return (u or {}).get("Role", "").strip().lower() or "viewer"
+
+
 @app.before_request
 def guard():
-    open_paths = ("/login", "/cron", "/static", "/oauth")
-    if request.path.startswith(open_paths):
+    if request.path.startswith(AUTH_OPEN):
         return
-    if UI_PASSWORD and not session.get("ok"):
+    u = current_user()
+    if not u:
         return redirect(url_for("login"))
+    if (u.get("Status") or "active").lower() == "pending":
+        if request.path not in ("/logout", "/me"):
+            return page("Waiting", "<h2>Almost there</h2><p class='sub'>Your account "
+                        "is waiting for the owner to approve it.</p>"
+                        "<a class='btn ghost' href='/logout'>Sign out</a>", "/")
+        return
+    if (u.get("Status") or "").lower() == "blocked":
+        session.clear()
+        return redirect(url_for("login"))
+    if role_of(u) == "viewer" and request.path not in VIEWER_OK:
+        return back("/library", "You do not have access to that page.", True)
+    if role_of(u) != "owner" and request.path == "/users" and request.method == "POST":
+        return back("/users", "Only the owner can change people.", True)
     if not gapi.has_token() and request.path not in ("/", "/settings", "/logout",
                                                      "/healthz", "/api/status"):
         return redirect("/")
 
 
+# ---------------------------------------------------------------- sign in
+
+def hash_pw(p):
+    from werkzeug.security import generate_password_hash
+    return generate_password_hash(p)
+
+
+def check_pw(stored, given):
+    from werkzeug.security import check_password_hash
+    try:
+        return check_password_hash(stored or "", given or "")
+    except Exception:
+        return False
+
+
+def auth_page(title, inner):
+    return render_template_string(
+        """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{t}} · YouTube Brief Desk</title><style>{{css|safe}}
+.auth{max-width:380px;margin:0 auto;padding:46px 18px 60px}
+.brand{text-align:center;margin-bottom:26px}
+.brand .mark{width:56px;height:56px;border-radius:14px;background:var(--green);
+  color:#fff;font:600 24px/56px Georgia,serif;margin:0 auto 10px}
+.brand h1{font:600 19px/1.3 Georgia,serif;margin:0}
+.brand p{color:var(--soft);font-size:13px;margin:4px 0 0}
+.auth .card{padding:20px}
+.alt{text-align:center;margin-top:16px;font-size:14px}
+</style></head><body><div class="auth">
+<div class="brand"><div class="mark">YB</div><h1>YouTube Brief Desk</h1>
+<p>transcripts, summaries and PDFs by email</p></div>
+{% if msg %}<div class="msg {{'bad' if bad else ''}}">{{msg}}</div>{% endif %}
+{{inner|safe}}</div></body></html>""",
+        t=title, css=CSS, inner=inner, msg=request.args.get("msg"),
+        bad=request.args.get("bad") == "1")
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        if request.form.get("password") == UI_PASSWORD:
-            session["ok"] = True
+        ident = (request.form.get("ident") or "").strip()
+        pw = request.form.get("password") or ""
+        if UI_PASSWORD and ident.lower() in ("owner", "admin") and pw == UI_PASSWORD:
+            session.clear()
+            session["master"] = True
             session.permanent = True
             return redirect("/")
-        return page("Login", "<h2>Password</h2><p class='sub'>Wrong password.</p>"
-                    + LOGIN_FORM)
-    return page("Login", "<h2>YouTube Brief Desk</h2>"
-                "<p class='sub'>Enter your password to continue.</p>" + LOGIN_FORM)
+        u = find_user(ident)
+        if not u or not check_pw(u.get("Password"), pw):
+            return redirect("/login?msg=Wrong+phone%2Femail+or+password.&bad=1")
+        if (u.get("Status") or "").lower() == "blocked":
+            return redirect("/login?msg=This+account+is+blocked.&bad=1")
+        session.clear()
+        session["user"] = (u.get("Email") or "").strip().lower()
+        session.permanent = True
+        try:
+            gapi.write_range("Users", f"J{u['_row']}", [[pipeline.now_str()]])
+        except Exception:
+            pass
+        return redirect("/")
+
+    inner = """<div class="card"><form method="post">
+      <label>PHONE / EMAIL</label>
+      <input name="ident" placeholder="Enter email or phone" autofocus required>
+      <div class="note" style="margin-top:5px">Either one works.</div>
+      <label>PASSWORD</label>
+      <input type="password" name="password" required>
+      <div style="margin-top:16px"><button class="btn" style="width:100%">Sign In</button></div>
+    </form></div>
+    <div class="card" style="margin-top:12px;text-align:center">
+      <a class="btn ghost" style="width:100%" href="/register">Register</a></div>
+    <div class="alt"><a href="/forgot">Forgotten your password?</a></div>"""
+    return auth_page("Sign in", inner)
 
 
-LOGIN_FORM = """<form method="post" class="card" style="max-width:340px">
-<label>Password</label><input type="password" name="password" autofocus>
-<div style="margin-top:14px"><button class="btn">Open</button></div></form>"""
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        f = request.form
+        email = (f.get("email") or "").strip().lower()
+        pw = f.get("password") or ""
+        if "@" not in email or "." not in email:
+            return redirect("/register?msg=Enter+a+valid+email.&bad=1")
+        if len(pw) < 6:
+            return redirect("/register?msg=Password+needs+6+characters+or+more.&bad=1")
+        if pw != (f.get("password2") or ""):
+            return redirect("/register?msg=The+two+passwords+do+not+match.&bad=1")
+        if find_user(email):
+            return redirect("/register?msg=That+email+is+already+registered.&bad=1")
+
+        first = not users()
+        phone = (f.get("phone") or "").strip()
+        where = (f.get("otp_to") or "email").lower()
+        st = pipeline.settings()
+        if where == "phone" and not pipeline.sms_ready(st):
+            return redirect("/register?msg=SMS+is+not+set+up+yet%2C+please+use+"
+                            "email.&bad=1")
+        code = f"{secrets_below(1000000):06d}"
+        PENDING[email] = {
+            "code": code,
+            "until": dt.datetime.now() + dt.timedelta(minutes=OTP_MINUTES),
+            "row": [email, (f.get("name") or "").strip(),
+                    phone, (f.get("gender") or "").strip(),
+                    (f.get("address") or "").strip(),
+                    "owner" if first else "viewer",
+                    "active" if first else "pending",
+                    hash_pw(pw), dt.date.today().strftime("%d %b %Y"), ""],
+        }
+        try:
+            if where == "phone":
+                pipeline.send_sms(phone,
+                                  f"{code} is your YouTube Brief Desk verification "
+                                  f"code. Valid for {OTP_MINUTES} minutes.", st)
+                PENDING[email]["sent_to"] = "your phone " + phone
+            else:
+                gapi.send_mail([email], "Your YouTube Brief Desk code",
+                               f"Your verification code is {code}\n\n"
+                               f"It is valid for {OTP_MINUTES} minutes.\n")
+                PENDING[email]["sent_to"] = email
+        except Exception as ex:
+            PENDING.pop(email, None)
+            return redirect(f"/register?msg=Could+not+send+the+code:+{e(ex)}&bad=1")
+        return redirect(f"/verify?email={email}")
+
+    inner = """<div class="card"><form method="post">
+      <label>FULL NAME</label><input name="name" required>
+      <label>MOBILE NUMBER</label>
+      <input name="phone" placeholder="+91 98xxxxxxxx" required>
+      <div class="note" style="margin-top:5px">Please add country code if you are a
+        user outside of India.</div>
+      <label>EMAIL</label><input type="email" name="email" required>
+      <label>GENDER</label>
+      <select name="gender">
+        <option value="">Prefer not to say</option>
+        <option>Female</option><option>Male</option><option>Other</option></select>
+      <label>ADDRESS</label><textarea name="address" rows="2"></textarea>
+      <label>PASSWORD</label><input type="password" name="password" required>
+      <label>REPEAT PASSWORD</label><input type="password" name="password2" required>
+      <label>WHERE SHOULD THE CODE GO?</label>
+      <div class="row" style="gap:16px">
+        <label style="margin:0"><input type="radio" name="otp_to" value="email"
+          checked style="width:auto"> Email</label>
+        <label style="margin:0"><input type="radio" name="otp_to" value="phone"
+          style="width:auto" {dis}> SMS on my phone{note}</label>
+      </div>
+      <div style="margin-top:16px">
+        <button class="btn" style="width:100%">Send code</button></div>
+    </form></div>
+    <div class="alt">Already have an account? <a href="/login">Sign in</a></div>"""
+    try:
+        ready = pipeline.sms_ready()
+    except Exception:
+        ready = False
+    inner = inner.format(dis="" if ready else "disabled",
+                         note="" if ready else " (not set up)")
+    return auth_page("Register", inner)
+
+
+def secrets_below(n):
+    import secrets as _s
+    return _s.randbelow(n)
+
+
+@app.route("/verify", methods=["GET", "POST"])
+def verify():
+    email = (request.args.get("email") or request.form.get("email") or "").strip().lower()
+    item = PENDING.get(email)
+    if request.method == "POST":
+        if not item:
+            return redirect("/register?msg=That+request+expired.+Please+start+again.&bad=1")
+        if dt.datetime.now() > item["until"]:
+            PENDING.pop(email, None)
+            return redirect("/register?msg=The+code+expired.+Please+start+again.&bad=1")
+        if (request.form.get("code") or "").strip() != item["code"]:
+            return redirect(f"/verify?email={email}&msg=Wrong+code.&bad=1")
+        gapi.append_row("Users", item["row"])
+        PENDING.pop(email, None)
+        session.clear()
+        session["user"] = email
+        session.permanent = True
+        return redirect("/")
+    inner = f"""<div class="card"><form method="post">
+      <input type="hidden" name="email" value="{e(email)}">
+      <p class="note" style="margin-top:0">We sent a 6-digit code to
+        <strong>{e((PENDING.get(email) or {}).get('sent_to') or email)}</strong>.
+        It is valid for {OTP_MINUTES} minutes.</p>
+      <label>CODE</label>
+      <input name="code" inputmode="numeric" autofocus required>
+      <div style="margin-top:16px">
+        <button class="btn" style="width:100%">Verify</button></div>
+    </form></div>
+    <div class="alt"><a href="/register">Start again</a></div>"""
+    return auth_page("Verify", inner)
+
+
+@app.route("/forgot", methods=["GET", "POST"])
+def forgot():
+    if request.method == "POST":
+        u = find_user(request.form.get("ident"))
+        if u and u.get("Email"):
+            new = f"{secrets_below(1000000):06d}"
+            try:
+                gapi.write_range("Users", f"H{u['_row']}", [[hash_pw(new)]])
+                gapi.send_mail([u["Email"]], "Your new password",
+                               f"Your new password is {new}\n\n"
+                               "Please sign in and change it from your profile.\n")
+            except Exception:
+                pass
+        return redirect("/login?msg=If+that+account+exists%2C+a+new+password+has+"
+                        "been+emailed.")
+    inner = """<div class="card"><form method="post">
+      <label>PHONE / EMAIL</label><input name="ident" autofocus required>
+      <div style="margin-top:16px">
+        <button class="btn" style="width:100%">Email me a new password</button></div>
+    </form></div><div class="alt"><a href="/login">Back to sign in</a></div>"""
+    return auth_page("Password", inner)
+
+
+@app.route("/me")
+def me():
+    u = current_user() or {}
+    body = f"""<h2>My account</h2>
+    <div class="card">
+      <div class="grid"><div>
+        <div class="note">Name</div><div>{e(u.get('Name'))}</div>
+        <div class="note" style="margin-top:10px">Email</div><div>{e(u.get('Email'))}</div>
+        <div class="note" style="margin-top:10px">Phone</div><div>{e(u.get('Phone'))}</div>
+      </div><div>
+        <div class="note">Role</div><div>{e(u.get('Role'))}</div>
+        <div class="note" style="margin-top:10px">Gender</div><div>{e(u.get('Gender'))}</div>
+        <div class="note" style="margin-top:10px">Address</div><div>{e(u.get('Address'))}</div>
+      </div></div>
+      <div class="row" style="margin-top:16px">
+        <a class="btn small ghost" href="/logout">Sign out</a></div>
+    </div>"""
+    return page("My account", body, "/me")
 
 
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect("/login")
+
+
+# ---------------------------------------------------------------- people
+
+@app.route("/users", methods=["GET", "POST"])
+def users_page():
+    data = gapi.read_all(force=request.method == "POST")
+    if request.method == "POST":
+        email = (request.form.get("email") or "").strip().lower()
+        action = request.form.get("action")
+        row = next((u for u in data["users"]
+                    if (u.get("Email") or "").strip().lower() == email), None)
+        if not row:
+            return back("/users", "Not found.", True)
+        if role_of(row) == "owner" and action in ("role", "block", "delete"):
+            return back("/users", "The owner cannot be changed here.", True)
+        try:
+            if action == "role":
+                gapi.write_range("Users", f"F{row['_row']}",
+                                 [[request.form.get("role", "viewer")]])
+                gapi.write_range("Users", f"G{row['_row']}", [["active"]])
+                return back("/users", "Updated.")
+            if action == "block":
+                gapi.write_range("Users", f"G{row['_row']}", [["blocked"]])
+                return back("/users", "Blocked.")
+            if action == "delete":
+                keep = [[u.get(k) for k in gapi.TABS["Users"]]
+                        for u in data["users"]
+                        if (u.get("Email") or "").strip().lower() != email]
+                gapi.replace_tab("Users", gapi.TABS["Users"], keep)
+                return back("/users", "Removed.")
+        except Exception as ex:
+            return back("/users", f"Could not do that: {ex}", True)
+
+    def card(u):
+        st = (u.get("Status") or "active").lower()
+        tag = {"active": "tag", "pending": "tag warn", "blocked": "tag bad"}.get(st, "tag")
+        buttons = ""
+        if role_of(u) != "owner":
+            buttons = f"""<form method="post" class="row" style="margin:0;gap:6px">
+              <input type="hidden" name="email" value="{e(u.get('Email'))}">
+              <select name="role" style="width:auto">
+                <option value="viewer" {'selected' if role_of(u) == 'viewer' else ''}>Viewer</option>
+                <option value="admin" {'selected' if role_of(u) == 'admin' else ''}>Admin</option>
+              </select>
+              <button class="btn small" name="action" value="role">
+                {'Approve' if st == 'pending' else 'Save'}</button>
+              <button class="btn small ghost" name="action" value="block">Block</button>
+              <button class="btn small ghost" name="action" value="delete">Remove</button>
+            </form>"""
+        return f"""<tr><td><strong>{e(u.get('Name') or u.get('Email'))}</strong>
+            <span class="{tag}" style="margin-left:7px">{e(st)}</span>
+            <span class="tag" style="margin-left:4px">{e(role_of(u))}</span>
+            <div class="note" style="margin-top:5px">{e(u.get('Email'))}
+              &nbsp;·&nbsp; {e(u.get('Phone'))}
+              &nbsp;·&nbsp; {e(u.get('Gender') or '—')}</div>
+            <div class="note">{e(u.get('Address') or '')}</div>
+            <div class="note">joined {e(u.get('Added'))} &nbsp;·&nbsp;
+              last seen {e(u.get('Last seen') or '—')}</div>
+            <div style="margin-top:9px">{buttons}</div></td></tr>"""
+
+    us = data["users"]
+    waiting = [u for u in us if (u.get("Status") or "").lower() == "pending"]
+    body = f"""<h2>People</h2>
+    <p class="sub">{len(us)} accounts{f' · {len(waiting)} waiting for approval' if waiting else ''}.
+      Anyone can register from the sign-in screen; they can only see anything once
+      you approve them.</p>
+    {'<div class="card"><table>' + ''.join(card(u) for u in us) + '</table></div>'
+     if us else '<p class="note">No accounts yet.</p>'}"""
+    return page("People", body, "/users")
 
 
 # ---------------------------------------------------------------- dashboard
@@ -701,6 +1055,11 @@ def settings_page():
             "output_title": request.form.get("output_title", "Summary").strip(),
             "openrouter_key": request.form.get("openrouter_key", "").strip(),
             "supadata_key": request.form.get("supadata_key", "").strip(),
+            "sms_provider": request.form.get("sms_provider", "").strip(),
+            "fast2sms_key": request.form.get("fast2sms_key", "").strip(),
+            "twilio_sid": request.form.get("twilio_sid", "").strip(),
+            "twilio_token": request.form.get("twilio_token", "").strip(),
+            "twilio_from": request.form.get("twilio_from", "").strip(),
         })
         SCHED["keep_awake"] = bool(request.form.get("keep_awake"))
         return back("/settings", "Saved.")
@@ -757,6 +1116,26 @@ def settings_page():
       <div class="note" style="margin-top:6px">Both keys can also live in Render's environment
         — leave these blank in that case.</div>
     </div>
+    <div class="card">
+      <div class="note" style="margin-bottom:10px">SMS for phone verification —
+        leave off to verify by email only.</div>
+      <label>SMS service</label>
+      <select name="sms_provider">
+        <option value="" {'selected' if not s.get('sms_provider') else ''}>Off — email codes only</option>
+        <option value="fast2sms" {'selected' if s.get('sms_provider') == 'fast2sms' else ''}>Fast2SMS (India)</option>
+        <option value="twilio" {'selected' if s.get('sms_provider') == 'twilio' else ''}>Twilio</option>
+      </select>
+      <label>Fast2SMS key</label>
+      <input name="fast2sms_key" value="{e(s.get('fast2sms_key'))}">
+      <div class="grid" style="margin-top:12px">
+        <div><label>Twilio account SID</label>
+          <input name="twilio_sid" value="{e(s.get('twilio_sid'))}"></div>
+        <div><label>Twilio auth token</label>
+          <input name="twilio_token" value="{e(s.get('twilio_token'))}"></div>
+      </div>
+      <label>Twilio sender number</label>
+      <input name="twilio_from" value="{e(s.get('twilio_from'))}" placeholder="+1...">
+    </div>
     <button class="btn">Save</button>
     </form>
     <div class="card" style="margin-top:18px">
@@ -765,7 +1144,7 @@ def settings_page():
         <a class="btn small ghost" href="{e(safe_sheet_url())}" target="_blank">Sheet</a>
         <a class="btn small ghost" href="{e(safe_drive_url())}" target="_blank">Drive</a>
         <a class="btn small ghost" href="/oauth/start">Reconnect Google</a>
-        <a class="btn small ghost" href="/logout">Logout</a>
+        <a class="btn small ghost" href="/me">My account</a>
       </div>
     </div>"""
     return page("Settings", body, "/settings")
