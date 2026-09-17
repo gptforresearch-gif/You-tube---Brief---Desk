@@ -17,8 +17,9 @@ import requests
 import gc
 
 import gapi
+import fonts
 
-BUILD = "18"
+BUILD = "19"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -221,6 +222,26 @@ def resolve_channel(text: str):
     if t:
         name = html.unescape(t.group(1))
     return cid, name or channel_title(cid) or cid
+
+
+EP_PATTERNS = [
+    r"(?:episode|epi|ep|part|pt)\s*[-–—:.#]?\s*(\d{1,4})\b",
+    r"(?:\u090f\u092a\u093f\u0938\u094b\u0921|\u092d\u093e\u0917|\u0905\u0902\u0915|"
+    r"\u0916\u0902\u0921|\u0905\u0927\u094d\u092f\u093e\u092f)\s*[-–—:.#]?\s*(\d{1,4})\b",
+    r"#\s*(\d{1,4})\b",
+    r"\|\s*(\d{1,4})\s*\|",
+    r"\b(\d{1,4})\s*(?:\u0935\u093e\u0901|\u0935\u093e\u0902)\b",
+]
+
+
+def episode_from_title(title: str) -> str:
+    """Video ke naam me jo episode number ho, wahi. Na mile to khaali."""
+    t = (title or "").strip()
+    for pat in EP_PATTERNS:
+        m = re.search(pat, t, re.IGNORECASE)
+        if m:
+            return m.group(1)
+    return ""
 
 
 def channel_title(cid: str) -> str:
@@ -558,7 +579,8 @@ def make_output(text: str, title: str, length: str, key: str,
 # ------------------------------------------------------------------ PDF
 
 def esc(t: str) -> str:
-    return (t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    """Har lipi ka apna font lag jaaye — hindi, gujarati, tamil, jo bhi."""
+    return fonts.markup(t)
 
 
 def memory_mb():
@@ -729,7 +751,8 @@ def process_video(video, channel_name, s, recipients, episode_no, serial_no,
     mark(f"pdf {len(pdf) // 1024} KB")
 
     step("saving to Drive")
-    safe = re.sub(r"[^\w\s-]", "", video["title"])[:70].strip() or video["video_id"]
+    safe = re.sub(r"[^\w\s-]", "", video["title"], flags=re.UNICODE)[:70].strip() \
+        or video["video_id"]
     fname = f"{date_local.strftime('%Y-%m-%d')} - {safe}.pdf"
     up = gapi.upload_pdf(fname, pdf, date_local.strftime("%Y-%m"),
                          public=s.get("pdf_public", "yes") == "yes")
@@ -848,10 +871,9 @@ def run_check(manual=False):
                     continue
                 try:
                     serial = len(gapi.rows_in(ch_sid, target)) + 1
-                    ep = per_channel.get(name, 0) + 1
+                    ep = episode_from_title(v["title"])
                     process_video(v, name, s, recipients, ep, serial, tab=target,
                                   sid=ch_sid)
-                    per_channel[name] = ep
                     seen.add(v["video_id"])
                     clear_state(v["video_id"], states)
                     done += 1

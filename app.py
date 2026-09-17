@@ -23,7 +23,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
-BUILD = "18"
+BUILD = "19"
 
 
 # ---------------------------------------------------------------- background
@@ -113,12 +113,11 @@ nav a.on{background:#F0F4F2;color:var(--green);box-shadow:inset 3px 0 0 var(--gr
   font-weight:600}
 main{flex:1;padding:30px 34px 70px;max-width:920px;position:relative}
 .clock{position:sticky;top:0;z-index:5;display:flex;justify-content:flex-end;
-  gap:9px;align-items:baseline;margin:-16px 0 16px;padding:7px 0;
-  background:linear-gradient(var(--paper) 72%,transparent);
-  font-size:13px;color:var(--soft);white-space:nowrap}
-.clock b{font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
-.clock span.d{color:var(--soft)}
-@media(max-width:760px){.clock{margin:-8px 0 12px;font-size:12.5px}}
+  gap:6px;align-items:baseline;margin:-20px 0 14px;padding:5px 0;
+  background:linear-gradient(var(--paper) 70%,transparent);
+  font-size:11.5px;color:#8A9099;white-space:nowrap;letter-spacing:.2px}
+.clock b{font-weight:500;color:#6B727C;font-variant-numeric:tabular-nums}
+@media(max-width:760px){.clock{margin:-6px 0 10px;font-size:11px}}
 h2{font:600 24px/1.25 Georgia,serif;margin:0 0 4px}
 .sub{color:var(--soft);margin:0 0 24px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;
@@ -183,8 +182,8 @@ SHELL = """<!doctype html><html lang="hi"><head><meta charset="utf-8">
 <small>build {{build}}</small></h1>
 {% for href,label in nav %}<a href="{{href}}" class="{{'on' if href==active}}">{{label}}</a>{% endfor %}
 </nav><main>
-<div class="clock" id="clock"><span class="d" id="ckday"></span>
-  <span id="ckdate"></span><b id="cktime"></b><span class="d">IST</span></div>
+<div class="clock" id="clock"><span id="ckday"></span><span id="ckdate"></span>
+  <b id="cktime"></b><span>IST</span></div>
 {% if msg %}<div class="msg {{'bad' if bad else ''}}">{{msg}}</div>{% endif %}
 {{body|safe}}
 </main></div><script>
@@ -195,11 +194,11 @@ if ('serviceWorker' in navigator) {
   var z = 'Asia/Kolkata', n = new Date();
   var f = function (o) { return new Intl.DateTimeFormat('en-IN',
       Object.assign({timeZone: z}, o)).format(n); };
-  document.getElementById('ckday').textContent = f({weekday: 'long'});
+  document.getElementById('ckday').textContent = f({weekday: 'short'}) + ' ·';
   document.getElementById('ckdate').textContent =
-    f({day: '2-digit', month: 'short', year: 'numeric'});
+    f({day: '2-digit', month: 'short', year: 'numeric'}) + ' ·';
   document.getElementById('cktime').textContent =
-    f({hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true});
+    f({hour: '2-digit', minute: '2-digit', hour12: true});
   setTimeout(tick, 1000);
 })();
 </script></body></html>"""
