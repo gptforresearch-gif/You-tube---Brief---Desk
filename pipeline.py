@@ -19,7 +19,7 @@ import gc
 import gapi
 import fonts
 
-BUILD = "20"
+BUILD = "22"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -51,6 +51,8 @@ DEFAULTS = {
     "paused": "no",
     "check_every_hours": "3",
     "keep_awake": "yes",
+    "supadata_blocked_until": "",
+    "proxy_url": "",
 }
 
 STATUS = {
@@ -388,12 +390,18 @@ def video_meta(video_id: str) -> dict:
 
 # ------------------------------------------------------------------ transcript
 
-def transcript_direct(video_id: str):
-    """Muft koshish. Cloud se aksar YouTube rok deta hai — isliye chup-chaap fail hone denge."""
+def transcript_direct(video_id: str, proxy: str = ""):
+    """Muft koshish. Proxy diya ho to uske raaste, warna seedhe.
+    Cloud se YouTube aksar rok deta hai — isliye chup-chaap fail hone denge."""
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
         try:
-            api = YouTubeTranscriptApi()
+            if proxy:
+                from youtube_transcript_api.proxies import GenericProxyConfig
+                api = YouTubeTranscriptApi(
+                    proxy_config=GenericProxyConfig(http_url=proxy, https_url=proxy))
+            else:
+                api = YouTubeTranscriptApi()
             fetched = api.fetch(video_id)
             snippets = getattr(fetched, "snippets", fetched)
             text = " ".join(getattr(s, "text", s.get("text", "")) for s in snippets)
@@ -404,6 +412,31 @@ def transcript_direct(video_id: str):
         return text if len(text) > 200 else None
     except Exception:
         return None
+
+
+class NoCredits(RuntimeError):
+    """Supadata ke credits khatam — ab is baar koshish ka koi fayda nahi."""
+
+
+def credits_blocked_until(s=None):
+    s = s or settings()
+    raw = (s.get("supadata_blocked_until") or "").strip()
+    if not raw:
+        return None
+    try:
+        when = dt.datetime.fromisoformat(raw)
+    except Exception:
+        return None
+    return when if when > dt.datetime.now() else None
+
+
+def block_credits(hours=12):
+    until = dt.datetime.now() + dt.timedelta(hours=hours)
+    try:
+        gapi.set_settings({"supadata_blocked_until": until.isoformat(timespec="minutes")})
+    except Exception:
+        pass
+    return until
 
 
 def transcript_supadata(video_id: str, key: str):
@@ -426,7 +459,7 @@ def transcript_supadata(video_id: str, key: str):
         if r.status_code in (401, 403):
             raise RuntimeError(f"Supadata refused ({r.status_code}). Check the key.")
         if r.status_code == 429:
-            raise RuntimeError("Supadata credits for this month are used up.")
+            raise NoCredits("Supadata credits for this month are used up.")
         if r.status_code >= 400:
             last_error = f"{r.status_code} {r.text[:200]}"
             continue
@@ -472,11 +505,29 @@ def supadata_text(data) -> str:
 
 
 def get_transcript(video_id: str, s=None):
+    """Teen raaste, isi kram me:
+       1. Aapke PC wale helper ne jo bhej diya ho (muft, bina seema)
+       2. Seedhe YouTube se — proxy diya ho to uske raaste (sasta, bina seema)
+       3. Supadata (mahine ke 100 muft)"""
     s = s or settings()
-    text = transcript_direct(video_id)
+    try:
+        if video_id in gapi.inbox_ids():
+            text = gapi.inbox_get(video_id)
+            if len(text) > 200:
+                return text, "your PC"
+    except Exception:
+        pass
+
+    proxy = (s.get("proxy_url") or "").strip()
+    text = transcript_direct(video_id, proxy)
     if text:
-        return text, "YouTube"
-    return transcript_supadata(video_id, supadata_key(s)), "Supadata"
+        return text, ("proxy" if proxy else "YouTube")
+
+    key = supadata_key(s)
+    if not key:
+        raise RuntimeError("No transcript yet. Waiting for your PC helper, "
+                           "a proxy, or a Supadata key.")
+    return transcript_supadata(video_id, key), "Supadata"
 
 
 # ------------------------------------------------------------------ OpenRouter
@@ -794,6 +845,46 @@ def process_video(video, channel_name, s, recipients, episode_no, serial_no,
     return up["link"]
 
 
+def videos_needing_transcript(limit=6):
+    """Helper ke liye: kin videos ka transcript abhi chahiye."""
+    data = gapi.read_all(force=True)
+    s = dict(DEFAULTS)
+    s.update(data["settings"])
+    have = {e.get("Video ID") for rs in data["rows"].values() for e in rs}
+    try:
+        have |= gapi.inbox_ids()
+    except Exception:
+        pass
+
+    want = []
+    for q in data.get("queue", []):
+        if q.get("Video Link") and (q.get("Status") or "").lower() == "pending":
+            vid = extract_video_id(q["Video Link"])
+            if vid and vid not in have:
+                want.append({"id": vid, "title": q["Video Link"]})
+
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(
+        days=int(s.get("lookback_days", "5") or 5))
+    for ch in data["channels"]:
+        if not ch.get("Channel ID") or ch.get("Active", "yes") == "no":
+            continue
+        try:
+            feed = fetch_feed(ch["Channel ID"].strip())
+        except Exception:
+            continue
+        for v in feed["videos"]:
+            if v["published"] >= cutoff and v["video_id"] not in have:
+                want.append({"id": v["video_id"], "title": v["title"]})
+        if len(want) >= limit:
+            break
+    seen, out = set(), []
+    for w in want:
+        if w["id"] not in seen:
+            seen.add(w["id"])
+            out.append(w)
+    return out[:limit]
+
+
 # ------------------------------------------------------------------ main run
 
 def run_check(manual=False):
@@ -810,6 +901,13 @@ def run_check(manual=False):
         s.update(data["settings"])
         if s.get("paused") == "yes" and not manual:
             STATUS["last_result"] = "Paused in Settings."
+            return STATUS["last_result"]
+
+        blocked = credits_blocked_until(s)
+        if blocked:
+            STATUS["last_result"] = (
+                f"Waiting — Supadata credits are used up. Will try again after "
+                f"{blocked.strftime('%d %b, %I:%M %p')}.")
             return STATUS["last_result"]
 
         channels = [c for c in data["channels"]
@@ -888,6 +986,12 @@ def run_check(manual=False):
                     clear_state(v["video_id"], states)
                     done += 1
                     free_memory()
+                except NoCredits as e:
+                    until = block_credits()
+                    log("error", f"Supadata credits are used up. Pausing until "
+                                 f"{until.strftime('%d %b, %I:%M %p')}.")
+                    STATUS["last_result"] = "Supadata credits are used up."
+                    return STATUS["last_result"]
                 except Exception as e:
                     attempts = bump_state(v["video_id"], e, states)
                     states = state_map()
@@ -929,6 +1033,12 @@ def run_check(manual=False):
                 gapi.write_range("Queue", f"D{q['_row']}", [["done"]])
                 done += 1
                 free_memory()
+            except NoCredits:
+                until = block_credits()
+                log("error", f"Supadata credits are used up. Pausing until "
+                             f"{until.strftime('%d %b, %I:%M %p')}.")
+                STATUS["last_result"] = "Supadata credits are used up."
+                return STATUS["last_result"]
             except Exception as ex:
                 gapi.write_range("Queue", f"D{q['_row']}", [[f"error: {str(ex)[:120]}"]])
                 log("error", f"link {q['Video Link']}: {ex}")

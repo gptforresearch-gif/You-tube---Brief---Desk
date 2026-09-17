@@ -23,7 +23,8 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
-BUILD = "20"
+HELPER_KEY = os.environ.get("HELPER_KEY", "")
+BUILD = "22"
 
 
 # ---------------------------------------------------------------- background
@@ -256,7 +257,7 @@ def e(t):
 
 AUTH_OPEN = ("/login", "/register", "/verify", "/cron", "/static", "/oauth",
              "/healthz", "/forgot", "/manifest.webmanifest", "/icon-",
-             "/sw.js")
+             "/sw.js", "/api/jobs", "/api/transcript")
 VIEWER_OK = ("/", "/library", "/logout", "/api/status", "/me")
 
 PENDING = {}          # email -> {"code", "until", "row"} — OTP ka intezaar
@@ -685,12 +686,29 @@ def dashboard():
                 "<div class='row' style='margin-top:14px'>"
                 "<a class='btn small' href='/channels'>Add a channel</a></div></div>")
 
+    blocked = pipeline.credits_blocked_until(s)
+    warn = ""
+    if blocked:
+        warn = f"""<div class="card" style="border-color:#EBD2CC;background:#FCF6F4">
+          <strong>Supadata credits are used up for this month.</strong>
+          <p class="note" style="margin:6px 0 0">New videos are waiting in line —
+            nothing is lost. They will be picked up as soon as credits are back.
+            Paused until {e(blocked.strftime('%d %b, %I:%M %p'))}.</p>
+          <div class="row" style="margin-top:11px">
+            <a class="btn small ghost" href="https://dash.supadata.ai" target="_blank">
+              Open Supadata</a>
+            <form method="post" action="/unblock" style="margin:0">
+              <button class="btn small ghost">I have added credits — try now</button>
+            </form>
+          </div></div>"""
+
     running = st["running"]
     state = (f"<span class='dot'></span>{e(st['step']) or 'working'}"
              if running else
              f"<span class='dot idle'></span>{e(st['last_result'])}")
 
     body = f"""<h2>Dashboard</h2><p class="sub">{len(eps)} episodes sent so far.</p>
+    {warn}
     {lead}
     <div class="card"><div class="row" style="justify-content:space-between">
       <div id="state">{state}</div>
@@ -750,6 +768,15 @@ def safe_drive_url():
 @app.route("/api/status")
 def api_status():
     return jsonify(pipeline.STATUS)
+
+
+@app.route("/unblock", methods=["POST"])
+def unblock():
+    if role_of(current_user()) not in ("owner", "admin"):
+        return back("/", "Only the owner can do that.", True)
+    gapi.set_settings({"supadata_blocked_until": ""})
+    pipeline.run_in_background(manual=True)
+    return back("/", "Trying again now.")
 
 
 @app.route("/run", methods=["POST"])
@@ -1133,6 +1160,7 @@ def settings_page():
             "output_title": request.form.get("output_title", "Summary").strip(),
             "openrouter_key": request.form.get("openrouter_key", "").strip(),
             "supadata_key": request.form.get("supadata_key", "").strip(),
+            "proxy_url": request.form.get("proxy_url", "").strip(),
             "sms_provider": request.form.get("sms_provider", "").strip(),
             "fast2sms_key": request.form.get("fast2sms_key", "").strip(),
             "twilio_sid": request.form.get("twilio_sid", "").strip(),
@@ -1189,6 +1217,10 @@ def settings_page():
       <label>OpenRouter key</label>
       <input name="openrouter_key" value="{e(s.get('openrouter_key'))}"
         placeholder="sk-or-...">
+      <label>Proxy for YouTube (optional — a residential proxy lets the app
+        fetch transcripts itself, with no monthly limit)</label>
+      <input name="proxy_url" value="{e(s.get('proxy_url'))}"
+        placeholder="http://user:password@host:port">
       <label>Supadata key</label>
       <input name="supadata_key" value="{e(s.get('supadata_key'))}">
       <div class="note" style="margin-top:6px">Both keys can also live in Render's environment
@@ -1387,6 +1419,43 @@ self.addEventListener('fetch', e => {
 """
     return Response(js, mimetype="application/javascript",
                     headers={"Cache-Control": "no-cache"})
+
+
+# ------------------------------------------- aapke PC wale helper ke liye
+
+def helper_ok():
+    given = (request.args.get("key") or request.form.get("key")
+             or (request.get_json(silent=True) or {}).get("key") or "")
+    return bool(HELPER_KEY) and given == HELPER_KEY
+
+
+@app.route("/api/jobs")
+def api_jobs():
+    if not helper_ok():
+        return jsonify({"error": "bad key"}), 403
+    try:
+        return jsonify({"videos": pipeline.videos_needing_transcript()})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+
+
+@app.route("/api/transcript", methods=["POST"])
+def api_transcript():
+    if not helper_ok():
+        return jsonify({"error": "bad key"}), 403
+    body = request.get_json(silent=True) or request.form
+    vid = (body.get("video_id") or "").strip()
+    text = body.get("text") or ""
+    if not vid or len(text) < 200:
+        return jsonify({"error": "need video_id and text"}), 400
+    try:
+        parts = gapi.inbox_put(vid, text)
+        pipeline.log("ok", f"transcript received from your PC — {vid} "
+                           f"({len(text) // 1000}k chars)")
+        pipeline.run_in_background()
+        return jsonify({"saved": True, "parts": parts})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
 
 
 @app.route("/refresh", methods=["POST"])

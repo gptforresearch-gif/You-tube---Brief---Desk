@@ -44,6 +44,7 @@ TABS = {
     "Sheets": ["Name", "Spreadsheet ID", "Link", "Added"],
     "Users": ["Email", "Name", "Phone", "Gender", "Address", "Role", "Status",
               "Password", "Added", "Last seen"],
+    "Inbox": ["Video ID", "Part", "Text", "Added"],
     "Channels": ["Channel ID", "Name", "Added On", "Active", "Sheet tab",
                  "Spreadsheet"],
     "Recipients": ["Email", "Name", "Active"],
@@ -56,7 +57,7 @@ TABS = {
 import time as _time
 
 SYSTEM_TABS = {"Channels", "Recipients", "Settings", "State", "Overflow",
-               "Log", "Queue", "Sheets", "Users"}
+               "Log", "Queue", "Sheets", "Users", "Inbox"}
 MAIN = "Main"
 MAX_DATA_TABS = 12
 
@@ -429,6 +430,39 @@ def set_settings(updates: dict):
     current.update({k: str(v) for k, v in updates.items()})
     rows = [[k, v] for k, v in sorted(current.items())]
     replace_tab("Settings", TABS["Settings"], rows)
+
+
+# ------------------------------------------------- Inbox (PC se aaya transcript)
+
+def inbox_ids():
+    res = _svc("sheets", "v4").spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id(), range="Inbox!A2:A20000").execute()
+    return {r[0] for r in res.get("values", []) if r}
+
+
+def inbox_get(video_id: str) -> str:
+    res = _svc("sheets", "v4").spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id(), range="Inbox!A2:C20000").execute()
+    parts = []
+    for row in res.get("values", []):
+        row = (list(row) + ["", "", ""])[:3]
+        if row[0] == video_id:
+            try:
+                n = int(row[1])
+            except Exception:
+                n = 0
+            parts.append((n, row[2]))
+    parts.sort()
+    return "".join(p[1] for p in parts)
+
+
+def inbox_put(video_id: str, text: str, chunk=45000):
+    import datetime as _dt
+    stamp = _dt.datetime.now().strftime("%d %b %Y, %I:%M %p")
+    rows = [[video_id, i + 1, text[i * chunk:(i + 1) * chunk], stamp]
+            for i in range((len(text) + chunk - 1) // chunk)]
+    append_rows("Inbox", rows)
+    return len(rows)
 
 
 # ------------------------------------------------- doosri spreadsheet files
