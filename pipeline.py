@@ -18,7 +18,7 @@ import gc
 
 import gapi
 
-BUILD = "16"
+BUILD = "17"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain

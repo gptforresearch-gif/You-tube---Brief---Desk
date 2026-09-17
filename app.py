@@ -13,7 +13,7 @@ os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 
 import gapi
 import pipeline
-from brand import LOGO, ICON
+from brand import LOGO, ICON, I192_B64, I512_B64, MASK_B64
 
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -23,7 +23,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
-BUILD = "16"
+BUILD = "17"
 
 
 # ---------------------------------------------------------------- background
@@ -164,6 +164,12 @@ SHELL = """<!doctype html><html lang="hi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#1F6F5C">
 <link rel="icon" href="{{icon}}">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Brief Desk">
+<meta name="mobile-web-app-capable" content="yes">
 <title>{{title}} · YouTube Brief Desk</title><style>{{css|safe}}</style></head>
 <body><div class="wrap">
 <nav><h1><img src="{{logo}}" alt=""><span>YouTube Brief Desk</span>
@@ -172,7 +178,11 @@ SHELL = """<!doctype html><html lang="hi"><head><meta charset="utf-8">
 </nav><main>
 {% if msg %}<div class="msg {{'bad' if bad else ''}}">{{msg}}</div>{% endif %}
 {{body|safe}}
-</main></div></body></html>"""
+</main></div><script>
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+</script></body></html>"""
 
 
 def page(title, body, active="/"):
@@ -201,7 +211,8 @@ def e(t):
 
 
 AUTH_OPEN = ("/login", "/register", "/verify", "/cron", "/static", "/oauth",
-             "/healthz", "/forgot")
+             "/healthz", "/forgot", "/manifest.webmanifest", "/icon-",
+             "/sw.js")
 VIEWER_OK = ("/", "/library", "/logout", "/api/status", "/me")
 
 PENDING = {}          # email -> {"code", "until", "row"} — OTP ka intezaar
@@ -288,6 +299,12 @@ def auth_page(title, inner):
         """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" href="{{icon}}">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Brief Desk">
+<meta name="mobile-web-app-capable" content="yes">
 <title>{{t}} · YouTube Brief Desk</title><style>{{css|safe}}
 .auth{max-width:380px;margin:0 auto;padding:46px 18px 60px}
 .brand{text-align:center;margin-bottom:26px}
@@ -300,7 +317,11 @@ def auth_page(title, inner):
 <div class="brand"><img src="{{logo}}" alt="YouTube Brief Desk">
 <p>transcripts, summaries and PDFs by email</p></div>
 {% if msg %}<div class="msg {{'bad' if bad else ''}}">{{msg}}</div>{% endif %}
-{{inner|safe}}</div></body></html>""",
+{{inner|safe}}</div><script>
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+</script></body></html>""",
         t=title, css=CSS, inner=inner, logo=LOGO, icon=ICON,
         msg=request.args.get("msg"),
         bad=request.args.get("bad") == "1")
@@ -1246,6 +1267,76 @@ def oauth_callback():
     except Exception as ex:
         return page("Google", f"<h2>Google</h2><div class='msg bad'>{e(ex)}</div>",
                     "/settings")
+
+
+# ---------------------------------------------------------------- app install
+
+APP_NAME = "YouTube Brief Desk"
+
+
+@app.route("/manifest.webmanifest")
+def manifest():
+    return jsonify({
+        "name": APP_NAME,
+        "short_name": "Brief Desk",
+        "description": "Transcripts, summaries and PDFs from YouTube, by email.",
+        "start_url": "/?src=app",
+        "scope": "/",
+        "display": "standalone",
+        "orientation": "portrait",
+        "background_color": "#FBFAF7",
+        "theme_color": "#1F6F5C",
+        "icons": [
+            {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png",
+             "purpose": "any"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png",
+             "purpose": "any"},
+            {"src": "/icon-mask.png", "sizes": "512x512", "type": "image/png",
+             "purpose": "maskable"},
+        ],
+        "shortcuts": [
+            {"name": "Add video", "url": "/add"},
+            {"name": "Library", "url": "/library"},
+        ],
+    })
+
+
+def _png(b64s):
+    import base64
+    return Response(base64.b64decode(b64s), mimetype="image/png",
+                    headers={"Cache-Control": "public, max-age=604800"})
+
+
+@app.route("/icon-192.png")
+def icon192():
+    return _png(I192_B64)
+
+
+@app.route("/icon-512.png")
+def icon512():
+    return _png(I512_B64)
+
+
+@app.route("/icon-mask.png")
+def iconmask():
+    return _png(MASK_B64)
+
+
+@app.route("/sw.js")
+def service_worker():
+    js = """
+self.addEventListener('install', e => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+self.addEventListener('fetch', e => {
+  // sab kuch seedha network se — app ka data hamesha taaza rahe
+  e.respondWith(fetch(e.request).catch(() =>
+    new Response('<h2 style="font:16px sans-serif;padding:30px">' +
+      'No internet just now. Please try again.</h2>',
+      {headers: {'Content-Type': 'text/html'}})));
+});
+"""
+    return Response(js, mimetype="application/javascript",
+                    headers={"Cache-Control": "no-cache"})
 
 
 @app.route("/healthz")
