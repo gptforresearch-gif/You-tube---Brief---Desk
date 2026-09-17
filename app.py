@@ -13,6 +13,7 @@ os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 
 import gapi
 import pipeline
+from brand import LOGO, ICON
 
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -22,7 +23,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
-BUILD = "14"
+BUILD = "15"
 
 
 # ---------------------------------------------------------------- background
@@ -103,6 +104,7 @@ nav{width:212px;flex:0 0 212px;border-right:1px solid var(--line);padding:22px 0
   background:#fff}
 nav h1{font:600 15px/1.3 Georgia,"Times New Roman",serif;margin:0 20px 20px;
   letter-spacing:.2px}
+nav h1 img{display:block;width:44px;height:44px;margin:0 0 9px}
 nav h1 small{display:block;font:400 11px/1.4 inherit;color:var(--soft);
   font-family:-apple-system,sans-serif;margin-top:3px}
 nav a{display:block;padding:9px 20px;color:var(--ink);text-decoration:none}
@@ -161,9 +163,11 @@ NAV = [("/", "Dashboard"), ("/add", "Add video"), ("/library", "Library"),
 SHELL = """<!doctype html><html lang="hi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#1F6F5C">
+<link rel="icon" href="{{icon}}">
 <title>{{title}} · YouTube Brief Desk</title><style>{{css|safe}}</style></head>
 <body><div class="wrap">
-<nav><h1>YouTube Brief Desk<small>build {{build}}</small></h1>
+<nav><h1><img src="{{logo}}" alt=""><span>YouTube Brief Desk</span>
+<small>build {{build}}</small></h1>
 {% for href,label in nav %}<a href="{{href}}" class="{{'on' if href==active}}">{{label}}</a>{% endfor %}
 </nav><main>
 {% if msg %}<div class="msg {{'bad' if bad else ''}}">{{msg}}</div>{% endif %}
@@ -182,6 +186,7 @@ def page(title, body, active="/"):
     nav = nav + [("/me", "My account")]
     return render_template_string(
         SHELL, title=title, body=body, css=CSS, nav=nav, active=active,
+        logo=LOGO, icon=ICON,
         build=BUILD, msg=request.args.get("msg"),
         bad=request.args.get("bad") == "1")
 
@@ -282,21 +287,22 @@ def auth_page(title, inner):
     return render_template_string(
         """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="{{icon}}">
 <title>{{t}} · YouTube Brief Desk</title><style>{{css|safe}}
 .auth{max-width:380px;margin:0 auto;padding:46px 18px 60px}
 .brand{text-align:center;margin-bottom:26px}
-.brand .mark{width:56px;height:56px;border-radius:14px;background:var(--green);
-  color:#fff;font:600 24px/56px Georgia,serif;margin:0 auto 10px}
+.brand img{width:112px;height:112px;display:block;margin:0 auto 12px}
 .brand h1{font:600 19px/1.3 Georgia,serif;margin:0}
 .brand p{color:var(--soft);font-size:13px;margin:4px 0 0}
 .auth .card{padding:20px}
 .alt{text-align:center;margin-top:16px;font-size:14px}
 </style></head><body><div class="auth">
-<div class="brand"><div class="mark">YB</div><h1>YouTube Brief Desk</h1>
+<div class="brand"><img src="{{logo}}" alt="YouTube Brief Desk">
 <p>transcripts, summaries and PDFs by email</p></div>
 {% if msg %}<div class="msg {{'bad' if bad else ''}}">{{msg}}</div>{% endif %}
 {{inner|safe}}</div></body></html>""",
-        t=title, css=CSS, inner=inner, msg=request.args.get("msg"),
+        t=title, css=CSS, inner=inner, logo=LOGO, icon=ICON,
+        msg=request.args.get("msg"),
         bad=request.args.get("bad") == "1")
 
 
