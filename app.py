@@ -23,7 +23,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
-BUILD = "15"
+BUILD = "16"
 
 
 # ---------------------------------------------------------------- background
@@ -632,7 +632,8 @@ def dashboard():
       <form method="post" action="/run" style="margin:0">
         <button class="btn small" {'disabled' if running else ''}>Run now</button>
       </form></div>
-      <div class="note" style="margin-top:10px">Auto: {'on' if AUTO else 'OFF — remove DISABLE_BACKGROUND in Render'}
+      <div class="note" style="margin-top:10px">Memory: {pipeline.memory_mb()} MB of 512
+        &nbsp;·&nbsp; Auto: {'on' if AUTO else 'OFF — remove DISABLE_BACKGROUND in Render'}
         &nbsp;·&nbsp; Last run: {e(st['last_run'] or '—')}
         &nbsp;·&nbsp; Next check: {e(SCHED['next_check'] or 'shortly')}
         &nbsp;·&nbsp; {'Staying awake' if SCHED['keep_awake'] else 'May sleep'}</div>

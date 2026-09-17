@@ -18,7 +18,7 @@ import gc
 
 import gapi
 
-BUILD = "15"
+BUILD = "16"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -676,7 +676,10 @@ def destination(row, data, default_tab="Episodes"):
 def process_video(video, channel_name, s, recipients, episode_no, serial_no,
                   tab="Episodes", instruction=None, sid=""):
     def step(msg):
-        STATUS["step"] = f"{video['title'][:50]} — {msg}"
+        STATUS["step"] = f"{video['title'][:50]} — {msg} [{memory_mb()} MB]"
+
+    def mark(msg):
+        log("mem", f"{memory_mb()} MB — {msg} — {video['title'][:34]}")
 
     key = openrouter_key(s)
     if not key:
@@ -684,22 +687,46 @@ def process_video(video, channel_name, s, recipients, episode_no, serial_no,
 
     step("fetching transcript")
     raw, source = get_transcript(video["video_id"], s)
+    mark(f"transcript {len(raw) // 1000}k chars")
 
     step("translating to English")
     english = to_english(raw, key, on_step=lambda m: step(m))
+    del raw
+    gc.collect()
+    mark(f"english {len(english) // 1000}k chars")
 
     task = instruction if instruction is not None else s.get("output_instruction", "")
     heading = (s.get("output_title") or "Summary").strip() or "Summary"
     step("writing")
     summary = make_output(english, video["title"], s.get("summary_length", "medium"),
                           key, instruction=task, on_step=lambda m: step(m))
+    gc.collect()
+    mark("after writing")
 
     date_local = video["published"].astimezone()
     date_str = date_local.strftime("%d %b %Y")
 
+    step("writing to the Sheet")
+    sheet_transcript = english
+    if len(english) > CELL_LIMIT:
+        parts = [english[i:i + CELL_LIMIT] for i in range(0, len(english), CELL_LIMIT)]
+        sheet_transcript = parts[0] + "\n\n[… rest is in the Overflow tab; the full text is in the PDF]"
+        try:
+            gapi.ensure_tab_in(sid, "Overflow") if sid else None
+            gapi.append_rows_in(sid, "Overflow",
+                                [[video["video_id"], i + 1, p]
+                                 for i, p in enumerate(parts[1:], 1)])
+        except Exception:
+            pass
+        del parts
+        gc.collect()
+
     step("building PDF")
     pdf = build_pdf(video["title"], channel_name, date_str, video["link"],
                     episode_no, summary, english, heading=heading)
+    del english
+    gc.collect()
+    mark(f"pdf {len(pdf) // 1024} KB")
 
     step("saving to Drive")
     safe = re.sub(r"[^\w\s-]", "", video["title"])[:70].strip() or video["video_id"]
@@ -723,19 +750,8 @@ def process_video(video, channel_name, s, recipients, episode_no, serial_no,
 
     del pdf
     gc.collect()
+    mark("done")
 
-    step("writing to the Sheet")
-    sheet_transcript = english
-    if len(english) > CELL_LIMIT:
-        parts = [english[i:i + CELL_LIMIT] for i in range(0, len(english), CELL_LIMIT)]
-        sheet_transcript = parts[0] + "\n\n[… rest is in the Overflow tab; the full text is in the PDF]"
-        try:
-            gapi.ensure_tab_in(sid, "Overflow") if sid else None
-            gapi.append_rows_in(sid, "Overflow",
-                                [[video["video_id"], i + 1, p]
-                                 for i, p in enumerate(parts[1:], 1)])
-        except Exception:
-            pass
     gapi.append_row_in(sid, tab, [
         serial_no, date_str, episode_no, video["link"], up["link"],
         sheet_transcript, summary, video["title"], channel_name,
@@ -816,6 +832,10 @@ def run_check(manual=False):
             fresh.sort(key=lambda v: v["published"])
 
             for v in fresh:
+                if memory_mb() > 320:
+                    STATUS["step"] = "memory is high — pausing until the next round"
+                    log("wait", f"{memory_mb()} MB — skipping the rest this round")
+                    break
                 if done >= 1:
                     STATUS["step"] = "one video done, the rest next time"
                     break
@@ -857,6 +877,9 @@ def run_check(manual=False):
                    if q.get("Video Link")
                    and (q.get("Status") or "").lower() not in ("done", "skip", "error")]
         for q in pending[:2]:
+            if memory_mb() > 320:
+                log("wait", f"{memory_mb()} MB — the rest of the queue waits")
+                break
             vid = extract_video_id(q["Video Link"])
             if not vid:
                 gapi.write_range("Queue", f"D{q['_row']}", [["error: not a video link"]])
