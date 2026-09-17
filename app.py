@@ -23,7 +23,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
-BUILD = "19"
+BUILD = "20"
 
 
 # ---------------------------------------------------------------- background
@@ -53,6 +53,29 @@ def _keepalive_loop():
             _rq.get(SCHED["own_url"] + "/healthz", timeout=20)
         except Exception:
             pass
+        refresh_if_heavy()
+
+
+MEM_LIMIT = 380          # MB — isse upar jaane par app khud ko taaza kar leti hai
+
+
+def refresh_if_heavy(where=""):
+    """Memory zyada ho to worker ko naye sire se shuru karo.
+    Gunicorn ka master zinda rehta hai, isliye service band nahi hoti —
+    bas ek pal ke liye anurodh ruk kar chalu ho jaate hain."""
+    mb = pipeline.memory_mb()
+    if mb < MEM_LIMIT or pipeline.STATUS.get("running"):
+        return False
+    pipeline.free_memory()
+    mb = pipeline.memory_mb()
+    if mb < MEM_LIMIT:
+        return False
+    try:
+        pipeline.log("mem", f"{mb} MB — refreshing the app {where}".strip())
+    except Exception:
+        pass
+    print(f"[memory] {mb} MB — restarting worker", flush=True)
+    os._exit(3)
 
 
 def _scheduler_loop():
@@ -67,6 +90,8 @@ def _scheduler_loop():
                 pipeline.run_in_background()
         except Exception as ex:
             print("[scheduler]", ex, flush=True)
+        pipeline.free_memory()
+        refresh_if_heavy("after a round")
         hours = max(0.25, min(hours, 24))
         # agar abhi kaam mila tha to jaldi laut kar aao — ek baari me ek video
         wait = 0.2 if pipeline.STATUS.get("did_work") else hours
@@ -669,9 +694,15 @@ def dashboard():
     {lead}
     <div class="card"><div class="row" style="justify-content:space-between">
       <div id="state">{state}</div>
-      <form method="post" action="/run" style="margin:0">
-        <button class="btn small" {'disabled' if running else ''}>Run now</button>
-      </form></div>
+      <div class="row" style="gap:7px">
+        <form method="post" action="/run" style="margin:0">
+          <button class="btn small" {'disabled' if running else ''}>Run now</button>
+        </form>
+        <form method="post" action="/refresh" style="margin:0">
+          <button class="btn small ghost" {'disabled' if running else ''}
+            title="Free the memory and start fresh">Refresh app</button>
+        </form>
+      </div></div>
       <div class="note" style="margin-top:10px">Memory: {pipeline.memory_mb()} MB of 512
         &nbsp;·&nbsp; Auto: {'on' if AUTO else 'OFF — remove DISABLE_BACKGROUND in Render'}
         &nbsp;·&nbsp; Last run: {e(st['last_run'] or '—')}
@@ -1356,6 +1387,19 @@ self.addEventListener('fetch', e => {
 """
     return Response(js, mimetype="application/javascript",
                     headers={"Cache-Control": "no-cache"})
+
+
+@app.route("/refresh", methods=["POST"])
+def refresh_now():
+    u = current_user()
+    if role_of(u) not in ("owner", "admin"):
+        return back("/", "Only the owner can do that.", True)
+    if pipeline.STATUS.get("running"):
+        return back("/", "A run is in progress — try again when it finishes.", True)
+    pipeline.free_memory()
+    import threading as _t
+    _t.Timer(0.5, lambda: os._exit(3)).start()
+    return back("/", "Refreshing — the app will be back in a few seconds.")
 
 
 @app.route("/healthz")

@@ -19,7 +19,7 @@ import gc
 import gapi
 import fonts
 
-BUILD = "19"
+BUILD = "20"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -583,6 +583,16 @@ def esc(t: str) -> str:
     return fonts.markup(t)
 
 
+def free_memory():
+    """Jo chhoda ja sakta hai, use OS ko wapas kar do."""
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
 def memory_mb():
     try:
         with open("/proc/self/status") as f:
@@ -877,7 +887,7 @@ def run_check(manual=False):
                     seen.add(v["video_id"])
                     clear_state(v["video_id"], states)
                     done += 1
-                    gc.collect()
+                    free_memory()
                 except Exception as e:
                     attempts = bump_state(v["video_id"], e, states)
                     states = state_map()
@@ -918,7 +928,7 @@ def run_check(manual=False):
                               instruction=q.get("Instruction") or None, sid=sid)
                 gapi.write_range("Queue", f"D{q['_row']}", [["done"]])
                 done += 1
-                gc.collect()
+                free_memory()
             except Exception as ex:
                 gapi.write_range("Queue", f"D{q['_row']}", [[f"error: {str(ex)[:120]}"]])
                 log("error", f"link {q['Video Link']}: {ex}")
@@ -939,6 +949,7 @@ def run_check(manual=False):
         log("error", f"run: {e}")
         return STATUS["last_result"]
     finally:
+        free_memory()
         STATUS.update({"running": False, "step": "", "last_run": now_str()})
         _run_lock.release()
 
