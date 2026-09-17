@@ -6,6 +6,7 @@ Koi service account nahi, koi app password nahi.
 
 import io
 import os
+import re
 import base64
 import socket
 import threading
@@ -38,8 +39,11 @@ EPISODE_HEADER = [
 TABS = {
     "Episodes": EPISODE_HEADER,
     "Links": EPISODE_HEADER,
-    "Queue": ["Video Link", "Added", "Emails", "Status", "Instruction"],
-    "Channels": ["Channel ID", "Name", "Added On", "Active"],
+    "Queue": ["Video Link", "Added", "Emails", "Status", "Instruction", "Sheet tab",
+              "Spreadsheet"],
+    "Sheets": ["Name", "Spreadsheet ID", "Link", "Added"],
+    "Channels": ["Channel ID", "Name", "Added On", "Active", "Sheet tab",
+                 "Spreadsheet"],
     "Recipients": ["Email", "Name", "Active"],
     "Settings": ["Key", "Value"],
     "State": ["Video ID", "Attempts", "Last Error", "Updated"],
@@ -48,6 +52,11 @@ TABS = {
 }
 
 import time as _time
+
+SYSTEM_TABS = {"Channels", "Recipients", "Settings", "State", "Overflow",
+               "Log", "Queue", "Sheets"}
+MAIN = "Main"
+MAX_DATA_TABS = 12
 
 _lock = threading.RLock()      # RLock: ek hi dhaage ko dobara taala
                                # lagane deta hai, warna wo khud atak jaata hai
@@ -181,6 +190,7 @@ def ensure_tabs(force=False):
     if _cache.get("tabs_ok") and not force:
         return
     _cache["tabs_ok"] = True
+    _cache["tab_names"] = None
     sid = spreadsheet_id()
     sheets = _svc("sheets", "v4")
     meta = sheets.spreadsheets().get(spreadsheetId=sid).execute()
@@ -205,20 +215,61 @@ def invalidate():
     _bundle["at"] = 0.0
 
 
+def all_tab_names(force=False):
+    if _cache.get("tab_names") and not force:
+        return _cache["tab_names"]
+    meta = _svc("sheets", "v4").spreadsheets().get(
+        spreadsheetId=spreadsheet_id(), fields="sheets.properties.title").execute()
+    names = [sh["properties"]["title"] for sh in meta.get("sheets", [])]
+    _cache["tab_names"] = names
+    return names
+
+
+def data_tabs(force=False):
+    """Episodes, Links aur aapke banaye hue tab — system waale chhod kar."""
+    names = [n for n in all_tab_names(force) if n not in SYSTEM_TABS]
+    for fixed in ("Links", "Episodes"):
+        if fixed in names:
+            names.remove(fixed)
+            names.insert(0, fixed)
+    return names[:MAX_DATA_TABS]
+
+
+def create_data_tab(name: str) -> str:
+    name = (name or "").strip()[:60]
+    if not name or name in SYSTEM_TABS:
+        raise RuntimeError("That tab name cannot be used.")
+    if name in all_tab_names(force=True):
+        return name
+    sheets = _svc("sheets", "v4")
+    sheets.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id(),
+        body={"requests": [{"addSheet": {"properties": {"title": name}}}]}).execute()
+    sheets.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id(), range=f"{name}!A1",
+        valueInputOption="RAW", body={"values": [EPISODE_HEADER]}).execute()
+    _cache["tab_names"] = None
+    invalidate()
+    return name
+
+
 def read_all(force=False):
     """Channels, Recipients, Settings, Episodes aur State — sab ek hi
     request me. Pehle har cheez alag maangi jaati thi, isi se der lagti thi."""
     if not force and _bundle["data"] and (_time.time() - _bundle["at"]) < BUNDLE_TTL:
         return _bundle["data"]
+    tabs = data_tabs()
     ranges = [
-        "Channels!A2:D1000", "Recipients!A2:C1000", "Settings!A2:B300",
-        "Episodes!A2:E100000", "Episodes!G2:K100000", "State!A2:D5000",
-        "Links!A2:E100000", "Links!G2:K100000", "Queue!A2:E2000",
+        "Channels!A2:F1000", "Recipients!A2:C1000", "Settings!A2:B300",
+        "State!A2:D5000", "Queue!A2:G2000", "Sheets!A2:D200",
     ]
+    base = len(ranges)
+    for t in tabs:
+        ranges += [f"{t}!A2:E100000", f"{t}!G2:K100000"]
     res = _svc("sheets", "v4").spreadsheets().values().batchGet(
         spreadsheetId=spreadsheet_id(), ranges=ranges).execute()
     vr = [r.get("values", []) for r in res.get("valueRanges", [])]
-    while len(vr) < 9:
+    while len(vr) < len(ranges):
         vr.append([])
 
     def rows(raw, keys, start=2):
@@ -245,8 +296,9 @@ def read_all(force=False):
             })
         return out
 
-    episodes = episode_rows(vr[3], vr[4])
-    links = episode_rows(vr[6], vr[7])
+    per_tab = {}
+    for i, t in enumerate(tabs):
+        per_tab[t] = episode_rows(vr[base + i * 2], vr[base + 1 + i * 2])
 
     settings = {}
     for row in vr[2]:
@@ -257,10 +309,13 @@ def read_all(force=False):
         "channels": rows(vr[0], TABS["Channels"]),
         "recipients": rows(vr[1], TABS["Recipients"]),
         "settings": settings,
-        "episodes": episodes,
-        "links": links,
-        "state": rows(vr[5], TABS["State"]),
-        "queue": rows(vr[8], TABS["Queue"]),
+        "tabs": tabs,
+        "rows": per_tab,
+        "episodes": per_tab.get("Episodes", []),
+        "links": per_tab.get("Links", []),
+        "state": rows(vr[3], TABS["State"]),
+        "queue": rows(vr[4], TABS["Queue"]),
+        "sheets": rows(vr[5], TABS["Sheets"]),
     }
     _bundle.update({"at": _time.time(), "data": data})
     return data
@@ -371,6 +426,107 @@ def set_settings(updates: dict):
     current.update({k: str(v) for k, v in updates.items()})
     rows = [[k, v] for k, v in sorted(current.items())]
     replace_tab("Settings", TABS["Settings"], rows)
+
+
+# ------------------------------------------------- doosri spreadsheet files
+
+def sid_from(text: str) -> str:
+    """Link ya ID — dono se spreadsheet ID."""
+    text = (text or "").strip()
+    m = re.search(r"/spreadsheets/d/([A-Za-z0-9_-]{20,})", text)
+    if m:
+        return m.group(1)
+    return text if re.fullmatch(r"[A-Za-z0-9_-]{20,}", text) else ""
+
+
+def sheet_link(sid: str) -> str:
+    return f"https://docs.google.com/spreadsheets/d/{sid}/edit"
+
+
+def spreadsheet_title(sid: str) -> str:
+    meta = _svc("sheets", "v4").spreadsheets().get(
+        spreadsheetId=sid, fields="properties.title").execute()
+    return meta.get("properties", {}).get("title", "")
+
+
+def make_spreadsheet(name: str, first_tab: str = "Episodes") -> dict:
+    ss = _svc("sheets", "v4").spreadsheets().create(
+        body={"properties": {"title": name},
+              "sheets": [{"properties": {"title": first_tab}}]},
+        fields="spreadsheetId").execute()
+    sid = ss["spreadsheetId"]
+    _svc("sheets", "v4").spreadsheets().values().update(
+        spreadsheetId=sid, range=f"{first_tab}!A1", valueInputOption="RAW",
+        body={"values": [EPISODE_HEADER]}).execute()
+    return {"id": sid, "link": sheet_link(sid), "title": name}
+
+
+def tabs_in(sid: str):
+    meta = _svc("sheets", "v4").spreadsheets().get(
+        spreadsheetId=sid, fields="sheets.properties.title").execute()
+    return [sh["properties"]["title"] for sh in meta.get("sheets", [])]
+
+
+def ensure_tab_in(sid: str, tab: str):
+    if sid in (None, "", spreadsheet_id()):
+        if tab not in data_tabs():
+            create_data_tab(tab)
+        return
+    if tab in tabs_in(sid):
+        return
+    svc = _svc("sheets", "v4").spreadsheets()
+    svc.batchUpdate(spreadsheetId=sid,
+                    body={"requests": [{"addSheet": {"properties": {"title": tab}}}]}
+                    ).execute()
+    svc.values().update(spreadsheetId=sid, range=f"{tab}!A1",
+                        valueInputOption="RAW",
+                        body={"values": [EPISODE_HEADER]}).execute()
+
+
+def append_row_in(sid: str, tab: str, row: list):
+    target = sid or spreadsheet_id()
+    _svc("sheets", "v4").spreadsheets().values().append(
+        spreadsheetId=target, range=f"{tab}!A1",
+        valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS",
+        body={"values": [row]}).execute()
+    if target == spreadsheet_id():
+        invalidate()
+
+
+def append_rows_in(sid: str, tab: str, rows: list):
+    if not rows:
+        return
+    target = sid or spreadsheet_id()
+    _svc("sheets", "v4").spreadsheets().values().append(
+        spreadsheetId=target, range=f"{tab}!A1",
+        valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS",
+        body={"values": rows}).execute()
+    if target == spreadsheet_id():
+        invalidate()
+
+
+def rows_in(sid: str, tab: str):
+    """Kisi bhi spreadsheet ke ek tab ki rows — Transcript column chhod kar."""
+    if not sid or sid == spreadsheet_id():
+        return read_all()["rows"].get(tab, [])
+    res = _svc("sheets", "v4").spreadsheets().values().batchGet(
+        spreadsheetId=sid,
+        ranges=[f"{tab}!A2:E100000", f"{tab}!G2:K100000"]).execute()
+    vr = [r.get("values", []) for r in res.get("valueRanges", [])]
+    while len(vr) < 2:
+        vr.append([])
+    a, b = vr[0], vr[1]
+    out = []
+    for i in range(max(len(a), len(b))):
+        ra = ((list(a[i]) if i < len(a) else []) + [""] * 5)[:5]
+        rb = ((list(b[i]) if i < len(b) else []) + [""] * 5)[:5]
+        if not (ra[3] or rb[1] or rb[3]):
+            continue
+        out.append({"_row": i + 2, "Sr.No.": ra[0], "Date": ra[1], "Episode": ra[2],
+                    "Video Link": ra[3], "PDF": ra[4], "Summary": rb[0],
+                    "Title": rb[1], "Channel": rb[2], "Video ID": rb[3],
+                    "Sent To": rb[4]})
+    return out
 
 
 # ---------------------------------------------------------------- drive (PDF)

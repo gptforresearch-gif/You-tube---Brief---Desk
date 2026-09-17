@@ -18,7 +18,7 @@ import gc
 
 import gapi
 
-BUILD = "10"
+BUILD = "12"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -585,10 +585,26 @@ def clear_state(video_id, existing):
                          [[video_id, "done", "", now_str()]])
 
 
+def destination(row, data, default_tab="Episodes"):
+    """(spreadsheet id, tab) — naam se registry me dhoondh kar."""
+    name = (row.get("Spreadsheet") or "").strip()
+    tab = (row.get("Sheet tab") or default_tab).strip() or default_tab
+    sid = ""
+    if name and name.lower() != gapi.MAIN.lower():
+        for sh in data.get("sheets", []):
+            if (sh.get("Name") or "").strip().lower() == name.lower():
+                sid = (sh.get("Spreadsheet ID") or "").strip()
+                break
+        if not sid:
+            raise RuntimeError(f"Spreadsheet '{name}' is not in the Sheets list.")
+    gapi.ensure_tab_in(sid, tab)
+    return sid, tab
+
+
 # ------------------------------------------------------------------ one video
 
 def process_video(video, channel_name, s, recipients, episode_no, serial_no,
-                  tab="Episodes", instruction=None):
+                  tab="Episodes", instruction=None, sid=""):
     def step(msg):
         STATUS["step"] = f"{video['title'][:50]} — {msg}"
 
@@ -643,9 +659,14 @@ def process_video(video, channel_name, s, recipients, episode_no, serial_no,
     if len(english) > CELL_LIMIT:
         parts = [english[i:i + CELL_LIMIT] for i in range(0, len(english), CELL_LIMIT)]
         sheet_transcript = parts[0] + "\n\n[… rest is in the Overflow tab; the full text is in the PDF]"
-        gapi.append_rows("Overflow",
-                         [[video["video_id"], i + 1, p] for i, p in enumerate(parts[1:], 1)])
-    gapi.append_row(tab, [
+        try:
+            gapi.ensure_tab_in(sid, "Overflow") if sid else None
+            gapi.append_rows_in(sid, "Overflow",
+                                [[video["video_id"], i + 1, p]
+                                 for i, p in enumerate(parts[1:], 1)])
+        except Exception:
+            pass
+    gapi.append_row_in(sid, tab, [
         serial_no, date_str, episode_no, video["link"], up["link"],
         sheet_transcript, summary, video["title"], channel_name,
         video["video_id"], ", ".join(recipients),
@@ -680,11 +701,21 @@ def run_check(manual=False):
             STATUS["last_result"] = "No channels added."
             return STATUS["last_result"]
 
-        episodes = data["episodes"]
-        seen = {e.get("Video ID") for e in episodes if e.get("Video ID")}
-        serial = len(episodes)
+        all_rows = [r for rs in data["rows"].values() for r in rs]
+        for sh in data.get("sheets", []):
+            sid2 = (sh.get("Spreadsheet ID") or "").strip()
+            if not sid2:
+                continue
+            for t in (gapi.tabs_in(sid2) if sid2 else []):
+                if t in gapi.SYSTEM_TABS:
+                    continue
+                try:
+                    all_rows += gapi.rows_in(sid2, t)
+                except Exception:
+                    pass
+        seen = {e.get("Video ID") for e in all_rows if e.get("Video ID")}
         per_channel = {}
-        for e in episodes:
+        for e in all_rows:
             ch = e.get("Channel", "")
             per_channel[ch] = max(per_channel.get(ch, 0),
                                   int(e.get("Episode") or 0) if str(e.get("Episode", "")).isdigit() else 0)
@@ -696,6 +727,12 @@ def run_check(manual=False):
         for ch in channels:
             cid = ch["Channel ID"].strip()
             name = ch.get("Name") or cid
+            try:
+                ch_sid, target = destination(ch, data, default_tab="Episodes")
+            except Exception as ex:
+                log("error", f"{name}: {ex}")
+                failed += 1
+                continue
             STATUS["step"] = f"checking {name}"
             try:
                 feed = fetch_feed(cid)
@@ -720,16 +757,16 @@ def run_check(manual=False):
                     skipped += 1
                     continue
                 try:
-                    serial += 1
+                    serial = len(gapi.rows_in(ch_sid, target)) + 1
                     ep = per_channel.get(name, 0) + 1
-                    process_video(v, name, s, recipients, ep, serial)
+                    process_video(v, name, s, recipients, ep, serial, tab=target,
+                                  sid=ch_sid)
                     per_channel[name] = ep
                     seen.add(v["video_id"])
                     clear_state(v["video_id"], states)
                     done += 1
                     gc.collect()
                 except Exception as e:
-                    serial -= 1
                     attempts = bump_state(v["video_id"], e, states)
                     states = state_map()
                     failed += 1
@@ -749,7 +786,6 @@ def run_check(manual=False):
         pending = [q for q in data.get("queue", [])
                    if q.get("Video Link")
                    and (q.get("Status") or "").lower() not in ("done", "skip", "error")]
-        link_serial = len(data.get("links", []))
         for q in pending[:2]:
             vid = extract_video_id(q["Video Link"])
             if not vid:
@@ -758,12 +794,13 @@ def run_check(manual=False):
                 continue
             try:
                 STATUS["step"] = "reading pasted link"
+                sid, target = destination(q, data, default_tab="Links")
                 v = video_meta(vid)
                 to = [x.strip() for x in (q.get("Emails") or "").replace(";", ",").split(",")
                       if "@" in x] or recipients
-                link_serial += 1
-                process_video(v, v["channel"], s, to, "", link_serial, tab="Links",
-                              instruction=q.get("Instruction") or None)
+                serial = len(gapi.rows_in(sid, target)) + 1
+                process_video(v, v["channel"], s, to, "", serial, tab=target,
+                              instruction=q.get("Instruction") or None, sid=sid)
                 gapi.write_range("Queue", f"D{q['_row']}", [["done"]])
                 done += 1
                 gc.collect()

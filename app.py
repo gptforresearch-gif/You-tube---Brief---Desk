@@ -22,7 +22,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
-BUILD = "10"
+BUILD = "12"
 
 
 # ---------------------------------------------------------------- background
@@ -155,8 +155,8 @@ td{padding:11px 8px;border-bottom:1px solid var(--line);vertical-align:top}
 """
 
 NAV = [("/", "Dashboard"), ("/add", "Add video"), ("/library", "Library"),
-       ("/channels", "Channels"), ("/recipients", "Recipients"),
-       ("/settings", "Settings"), ("/logs", "Logs")]
+       ("/channels", "Channels"), ("/sheets", "Spreadsheets"),
+       ("/recipients", "Recipients"), ("/settings", "Settings"), ("/logs", "Logs")]
 
 SHELL = """<!doctype html><html lang="hi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -232,7 +232,7 @@ def dashboard():
     try:
         gapi.ensure_tabs()
         data = gapi.read_all()
-        eps = data["episodes"] + data["links"]
+        eps = [r for rs in data["rows"].values() for r in rs]
         chans = data["channels"]
         recips = [r for r in data["recipients"] if r.get("Active", "yes") != "no"]
     except Exception as ex:
@@ -346,21 +346,33 @@ def channels():
                 cid, name = pipeline.resolve_channel(request.form.get("channel", ""))
                 if any(r["Channel ID"] == cid for r in rows):
                     return back("/channels", "That channel is already added.", True)
+                tab = (request.form.get("new_tab", "").strip()
+                       or request.form.get("tab", "").strip() or "Episodes")
+                book = (request.form.get("book", "") or gapi.MAIN).strip()
+                pipeline.destination({"Spreadsheet": book, "Sheet tab": tab},
+                                     gapi.read_all(force=True))
                 gapi.append_row("Channels", [cid, name,
-                                             dt.date.today().strftime("%d %b %Y"), "yes"])
+                                             dt.date.today().strftime("%d %b %Y"),
+                                             "yes", tab, book])
                 return back("/channels", f"{name} added.")
             if action == "delete":
-                keep = [[r.get("Channel ID"), r.get("Name"), r.get("Added On"), r.get("Active")]
+                keep = [[r.get("Channel ID"), r.get("Name"), r.get("Added On"),
+                         r.get("Active"), r.get("Sheet tab"), r.get("Spreadsheet")]
                         for r in rows if r.get("Channel ID") != request.form.get("cid")]
                 gapi.replace_tab("Channels", gapi.TABS["Channels"], keep)
                 return back("/channels", "Removed.")
         except Exception as ex:
             return back("/channels", f"Nahi ho paya: {ex}", True)
 
-    rows = gapi.read_all()["channels"]
+    d = gapi.read_all()
+    rows = d["channels"]
+    copts = "".join(f'<option value="{e(t)}" {"selected" if t == "Episodes" else ""}>{e(t)}</option>'
+                    for t in d["tabs"])
     trs = "".join(f"""<tr><td><strong>{e(r.get('Name'))}</strong>
         <div class="note">{e(r.get('Channel ID'))}</div></td>
-        <td class="note">{e(r.get('Added On'))}</td>
+        <td class="note">{e(r.get('Added On'))}<br>
+          <span class="tag">{e(r.get('Spreadsheet') or gapi.MAIN)} ›
+            {e(r.get('Sheet tab') or 'Episodes')}</span></td>
         <td style="text-align:right"><form method="post" style="margin:0">
         <input type="hidden" name="action" value="delete">
         <input type="hidden" name="cid" value="{e(r.get('Channel ID'))}">
@@ -371,6 +383,13 @@ def channels():
       <input type="hidden" name="action" value="add">
       <label>Channel link, @handle, or the UC… channel ID</label>
       <input name="channel" placeholder="https://www.youtube.com/@channelname" required>
+      <div class="grid" style="margin-top:10px">
+        <div><label>Spreadsheet</label>
+          <select name="book">{sheet_options(d)}</select></div>
+        <div><label>Tab</label><select name="tab">{copts}</select></div>
+      </div>
+      <label>…or a new tab</label>
+      <input name="new_tab" placeholder="e.g. Morning talks">
       <div style="margin-top:13px"><button class="btn">Add</button></div>
     </form></div>
     {'<div class="card"><table><tr><th>Channel</th><th>Added</th><th></th></tr>'
@@ -424,6 +443,15 @@ def add_video():
         raw = request.form.get("links", "")
         emails = request.form.get("emails", "").strip()
         instruction = request.form.get("instruction", "").strip()
+        target = (request.form.get("new_tab", "").strip()
+                  or request.form.get("tab", "").strip() or "Links")
+        book = (request.form.get("book", "") or gapi.MAIN).strip()
+        try:
+            sid, target = pipeline.destination(
+                {"Spreadsheet": book, "Sheet tab": target},
+                gapi.read_all(force=True), default_tab="Links")
+        except Exception as ex:
+            return back("/add", f"Could not prepare that sheet: {ex}", True)
         found, bad = [], []
         for line in re.split(r"[\s,]+", raw):
             line = line.strip()
@@ -436,14 +464,18 @@ def add_video():
         today = dt.date.today().strftime("%d %b %Y")
         gapi.append_rows("Queue", [
             [f"https://www.youtube.com/watch?v={v}", today, emails, "pending",
-             instruction] for v in found])
+             instruction, target, book] for v in found])
         pipeline.run_in_background(manual=True)
-        note = f"{len(found)} video(s) queued. They will be emailed shortly."
+        note = (f"{len(found)} video(s) queued for {book} → {target}. "
+                "They will be emailed shortly.")
         if bad:
             note += f" {len(bad)} line(s) skipped."
         return back("/add", note)
 
-    q = gapi.read_all()["queue"]
+    d = gapi.read_all()
+    q = d["queue"]
+    opts = "".join(f'<option value="{e(t)}" {"selected" if t == "Links" else ""}>{e(t)}</option>'
+                   for t in d["tabs"])
     waiting = [r for r in q if (r.get("Status") or "").lower() == "pending"]
     recent = list(reversed(q))[:15]
     trs = "".join(f"""<tr><td>{e(r.get('Video Link'))}</td>
@@ -452,14 +484,22 @@ def add_video():
     body = f"""<h2>Add video</h2>
     <p class="sub">Paste any YouTube links — they do not have to be from your
       channels. Each one gets a transcript, an English summary, a PDF by email,
-      and a row in the <strong>Links</strong> tab of your Sheet. You can also say
-      what should be written instead of the usual summary.</p>
+      and a row in whichever tab of your Sheet you pick — an existing one, or a
+      new one you name here. You can also say what should be written instead of
+      the usual summary.</p>
     <div class="card"><form method="post">
       <label>YouTube links (one per line)</label>
       <textarea name="links" rows="5"
         placeholder="https://www.youtube.com/watch?v=..."></textarea>
       <label>Send to (optional — leave blank to use your usual recipients)</label>
       <input name="emails" placeholder="someone@example.com, another@example.com">
+      <div class="grid">
+        <div><label>Spreadsheet</label>
+          <select name="book">{sheet_options(d)}</select></div>
+        <div><label>Tab</label><select name="tab">{opts}</select></div>
+      </div>
+      <label>…or type a new tab name</label>
+      <input name="new_tab" placeholder="e.g. Court hearings">
       <label>What should be written? (optional — leave blank for your usual
         setting in Settings)</label>
       <textarea name="instruction" rows="3"
@@ -474,14 +514,113 @@ newsletter."></textarea>
     return page("Add video", body, "/add")
 
 
+# ---------------------------------------------------------------- spreadsheets
+
+def sheet_options(data, selected=""):
+    names = [gapi.MAIN] + [(sh.get("Name") or "").strip()
+                           for sh in data.get("sheets", []) if sh.get("Name")]
+    return "".join(f'<option value="{e(n)}" {"selected" if n == selected else ""}>'
+                   f'{e(n)}</option>' for n in names)
+
+
+@app.route("/sheets", methods=["GET", "POST"])
+def sheets_page():
+    if request.method == "POST":
+        action = request.form.get("action")
+        try:
+            rows = gapi.read_all(force=True)["sheets"]
+            if action == "delete":
+                keep = [[r.get("Name"), r.get("Spreadsheet ID"), r.get("Link"),
+                         r.get("Added")] for r in rows
+                        if r.get("Name") != request.form.get("name")]
+                gapi.replace_tab("Sheets", gapi.TABS["Sheets"], keep)
+                return back("/sheets", "Removed from the list. The file itself is "
+                            "untouched.")
+
+            name = (request.form.get("name") or "").strip()
+            if not name or name.lower() == gapi.MAIN.lower():
+                return back("/sheets", "Give it a different short name.", True)
+            if any((r.get("Name") or "").lower() == name.lower() for r in rows):
+                return back("/sheets", "That name is already used.", True)
+
+            link = (request.form.get("link") or "").strip()
+            if link:
+                sid = gapi.sid_from(link)
+                if not sid:
+                    return back("/sheets", "That does not look like a Google "
+                                "Sheets link.", True)
+                title = gapi.spreadsheet_title(sid)       # pahunch ki jaanch
+                made = {"id": sid, "link": gapi.sheet_link(sid), "title": title}
+            else:
+                made = gapi.make_spreadsheet(name,
+                                             request.form.get("tab", "Episodes").strip()
+                                             or "Episodes")
+            gapi.append_row("Sheets", [name, made["id"], made["link"],
+                                       dt.date.today().strftime("%d %b %Y")])
+            return back("/sheets", f"{name} is ready.")
+        except Exception as ex:
+            return back("/sheets", f"Could not add it: {ex}", True)
+
+    data = gapi.read_all()
+    trs = "".join(f"""<tr><td><strong>{e(r.get('Name'))}</strong>
+        <div class="note">added {e(r.get('Added'))}</div></td>
+        <td><a href="{e(r.get('Link'))}" target="_blank">open</a></td>
+        <td style="text-align:right"><form method="post" style="margin:0">
+        <input type="hidden" name="action" value="delete">
+        <input type="hidden" name="name" value="{e(r.get('Name'))}">
+        <button class="btn small ghost">Remove</button></form></td></tr>"""
+        for r in data["sheets"])
+    body = f"""<h2>Spreadsheets</h2>
+    <p class="sub">Rows normally go to your main sheet. Add other spreadsheet
+      files here and you can send a channel — or any pasted link — to one of them
+      instead.</p>
+    <div class="card"><form method="post">
+      <input type="hidden" name="action" value="add">
+      <div class="grid">
+        <div><label>Short name (you pick this)</label>
+          <input name="name" placeholder="e.g. Court channel" required></div>
+        <div><label>First tab name (for a brand-new file)</label>
+          <input name="tab" placeholder="Episodes"></div>
+      </div>
+      <label>Link to an existing Google Sheet — leave blank to create a new file</label>
+      <input name="link" placeholder="https://docs.google.com/spreadsheets/d/...">
+      <div style="margin-top:13px"><button class="btn">Add</button></div>
+    </form></div>
+    <div class="card"><table>
+      <tr><td><strong>{e(gapi.MAIN)}</strong>
+        <div class="note">the sheet this app made</div></td>
+      <td><a href="{e(safe_sheet_url())}" target="_blank">open</a></td>
+      <td></td></tr>{trs}</table></div>"""
+    return page("Spreadsheets", body, "/sheets")
+
+
 # ---------------------------------------------------------------- library
 
 @app.route("/library")
 def library():
     q = (request.args.get("q") or "").lower().strip()
-    which = "links" if request.args.get("tab") == "links" else "episodes"
     data = gapi.read_all()
-    rows = list(reversed(data[which]))
+    book = request.args.get("book") or gapi.MAIN
+    sid = ""
+    if book != gapi.MAIN:
+        for sh in data["sheets"]:
+            if (sh.get("Name") or "") == book:
+                sid = (sh.get("Spreadsheet ID") or "").strip()
+        if not sid:
+            book, sid = gapi.MAIN, ""
+    try:
+        tabs = (data["tabs"] if not sid
+                else [t for t in gapi.tabs_in(sid) if t not in gapi.SYSTEM_TABS])
+    except Exception:
+        tabs = []
+    tabs = tabs or ["Episodes"]
+    which = request.args.get("tab") or tabs[0]
+    if which not in tabs:
+        which = tabs[0]
+    try:
+        rows = list(reversed(gapi.rows_in(sid, which)))
+    except Exception:
+        rows = []
     if q:
         rows = [r for r in rows if q in (r.get("Title", "") + r.get("Summary", "")).lower()]
     trs = "".join(f"""<tr>
@@ -498,15 +637,21 @@ def library():
               <input type="hidden" name="title" value="{e(r.get('Title'))}">
               <button class="btn small ghost">Email again</button></form>
           </div></td></tr>""" for r in rows[:200])
-    other = "episodes" if which == "links" else "links"
-    counts = {"episodes": len(data["episodes"]), "links": len(data["links"])}
+    books = [gapi.MAIN] + [(sh.get("Name") or "") for sh in data["sheets"]
+                           if sh.get("Name")]
+    bpick = " &nbsp;·&nbsp; ".join(
+        f"<strong>{e(bk)}</strong>" if bk == book
+        else f'<a href="/library?book={e(bk)}">{e(bk)}</a>' for bk in books)
+    picker = " &nbsp;·&nbsp; ".join(
+        f"<strong>{e(t)}</strong>" if t == which
+        else f'<a href="/library?book={e(book)}&tab={e(t)}">{e(t)}</a>'
+        for t in tabs)
     body = f"""<h2>Library</h2>
-    <p class="sub">{counts[which]} {'pasted links' if which == 'links' else 'episodes'}
-      &nbsp;·&nbsp; <a href="/library?tab={other}">show
-      {'channel episodes' if which == 'links' else 'pasted links'}
-      ({counts[other]})</a></p>
+    <p class="sub">{bpick}</p><p class="sub" style="margin-top:-14px">{picker}
+      &nbsp;·&nbsp; {len(rows)} rows</p>
     <form class="card" method="get"><div class="row">
-      <input type="hidden" name="tab" value="{which}">
+      <input type="hidden" name="book" value="{e(book)}">
+      <input type="hidden" name="tab" value="{e(which)}">
       <input name="q" value="{e(q)}" placeholder="search title or summary"
         style="flex:1;min-width:200px"><button class="btn">Search</button></div></form>
     {'<div class="card"><table>' + trs + '</table></div>' if rows else
