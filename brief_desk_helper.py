@@ -26,6 +26,8 @@ HELPER_KEY = "PASTE-YOUR-HELPER-KEY-HERE"             # Render me daali gayi HEL
 
 EVERY_MINUTES = 10        # kitni-kitni der me poochhe
 
+VERSION = "3"
+
 # ------------------------------------------------------------------------------
 
 import requests
@@ -36,17 +38,69 @@ def log(msg):
 
 
 def fetch_transcript(video_id):
-    """Ghar ke internet se transcript. Pehle jo mile, wahi."""
+    """Ghar ke internet se transcript — JIS BHI BHASHA me mile.
+    Hindi, gujarati, angrezi, kuch bhi. Anuvaad app khud kar leti hai."""
     from youtube_transcript_api import YouTubeTranscriptApi
+
+    BLOCK = 30      # har 30 second par ek samay ka nishan
+
+    def stamp(sec):
+        sec = int(sec or 0)
+        h, rest = divmod(max(sec, 0), 3600)
+        m, s = divmod(rest, 60)
+        return f"[{h}:{m:02d}:{s:02d}]" if h else f"[{m:02d}:{s:02d}]"
+
+    def join(snippets):
+        """Samay ke nishan ke saath — har 30 second par."""
+        segs = []
+        for sn in snippets:
+            if isinstance(sn, dict):
+                segs.append((sn.get("start", 0) or 0, sn.get("text", "")))
+            else:
+                segs.append((getattr(sn, "start", 0) or 0, getattr(sn, "text", "")))
+        lines, cur, start = [], [], None
+        for sec, text in segs:
+            text = " ".join((text or "").split())
+            if not text:
+                continue
+            if start is None:
+                start = sec
+            if sec - start >= BLOCK and cur:
+                lines.append(f"{stamp(start)} {' '.join(cur)}")
+                cur, start = [], sec
+            cur.append(text)
+        if cur:
+            lines.append(f"{stamp(start or 0)} {' '.join(cur)}")
+        return "\n".join(lines)
+
+    # naya tareeka (version 1.x)
     try:
         api = YouTubeTranscriptApi()
-        fetched = api.fetch(video_id)
-        snippets = getattr(fetched, "snippets", fetched)
-        text = " ".join(getattr(s, "text", "") or s.get("text", "") for s in snippets)
-    except AttributeError:
-        data = YouTubeTranscriptApi.get_transcript(video_id)
-        text = " ".join(d["text"] for d in data)
-    return " ".join(text.split())
+        try:
+            listing = api.list(video_id)
+        except AttributeError:
+            listing = None
+
+        if listing is not None:
+            tracks = list(listing)
+            if not tracks:
+                raise RuntimeError("koi transcript nahi hai")
+            # pehle aadmi ka likha hua, na ho to apne aap bana hua
+            tracks.sort(key=lambda t: getattr(t, "is_generated", True))
+            langs = [getattr(t, "language_code", "") for t in tracks]
+            print(f"      milne wali bhashayein: {', '.join(langs)}", flush=True)
+            return join(tracks[0].fetch())
+
+        return join(api.fetch(video_id).snippets)
+    except Exception as first:
+        # purana tareeka (version 0.x)
+        try:
+            listing = YouTubeTranscriptApi.list_transcripts(video_id)
+            tracks = list(listing)
+            tracks.sort(key=lambda t: getattr(t, "is_generated", True))
+            return join(tracks[0].fetch())
+        except Exception:
+            raise first
 
 
 def one_round():
@@ -80,7 +134,7 @@ def one_round():
 
 
 def main():
-    log("YouTube Brief Desk helper chalu. Band karne ke liye ye khidki band kar dijiye.")
+    log(f"YouTube Brief Desk helper (v{VERSION}) chalu. Band karne ke liye ye khidki band kar dijiye.")
     log(f"App: {APP_URL}")
     while True:
         try:

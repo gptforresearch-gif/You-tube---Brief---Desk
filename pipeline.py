@@ -19,7 +19,7 @@ import gc
 import gapi
 import fonts
 
-BUILD = "22"
+BUILD = "24"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -53,6 +53,8 @@ DEFAULTS = {
     "keep_awake": "yes",
     "supadata_blocked_until": "",
     "proxy_url": "",
+    "attach_pdf": "yes",
+    "whatsapp_length": "1200",
 }
 
 STATUS = {
@@ -119,6 +121,63 @@ def split_text(text: str, max_chars: int):
     if buf.strip():
         parts.append(buf.strip())
     return parts or [""]
+
+
+# ------------------------------------------------------------ samay ke nishan
+
+BLOCK_SECONDS = 30       # har itne second par ek nishan
+
+
+def stamp(seconds) -> str:
+    try:
+        sec = int(float(seconds))
+    except Exception:
+        sec = 0
+    h, rest = divmod(max(sec, 0), 3600)
+    m, sc = divmod(rest, 60)
+    return f"[{h}:{m:02d}:{sc:02d}]" if h else f"[{m:02d}:{sc:02d}]"
+
+
+def blocks_from_segments(segments, every=BLOCK_SECONDS) -> str:
+    """[(second, text), ...] -> '[00:30] baat...' wali panktiyan."""
+    out, cur, start = [], [], None
+    for sec, text in segments:
+        text = re.sub(r"\s+", " ", (text or "")).strip()
+        if not text:
+            continue
+        if start is None:
+            start = sec
+        if sec - start >= every and cur:
+            out.append(f"{stamp(start)} {' '.join(cur)}")
+            cur, start = [], sec
+        cur.append(text)
+    if cur:
+        out.append(f"{stamp(start or 0)} {' '.join(cur)}")
+    return "\n".join(out)
+
+
+STAMP_RE = re.compile(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*(.*)$")
+
+
+def split_stamped(text):
+    """Nishan wali panktiyon ko (nishan, baat) me alag karo."""
+    rows = []
+    for line in (text or "").split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        m = STAMP_RE.match(line)
+        if m:
+            rows.append([m.group(1), m.group(2)])
+        elif rows:
+            rows[-1][1] += " " + line
+        else:
+            rows.append(["", line])
+    return rows
+
+
+def has_stamps(text) -> bool:
+    return bool(STAMP_RE.match((text or "").strip().split("\n")[0] or ""))
 
 
 # ------------------------------------------------------------------ SMS
@@ -404,11 +463,14 @@ def transcript_direct(video_id: str, proxy: str = ""):
                 api = YouTubeTranscriptApi()
             fetched = api.fetch(video_id)
             snippets = getattr(fetched, "snippets", fetched)
-            text = " ".join(getattr(s, "text", s.get("text", "")) for s in snippets)
+            segs = [(getattr(sn, "start", 0) if not isinstance(sn, dict)
+                     else sn.get("start", 0),
+                     getattr(sn, "text", "") if not isinstance(sn, dict)
+                     else sn.get("text", "")) for sn in snippets]
+            text = blocks_from_segments(segs)
         except Exception:
             data = YouTubeTranscriptApi.get_transcript(video_id)
-            text = " ".join(d["text"] for d in data)
-        text = re.sub(r"\s+", " ", text).strip()
+            text = blocks_from_segments([(d.get("start", 0), d["text"]) for d in data])
         return text if len(text) > 200 else None
     except Exception:
         return None
@@ -416,6 +478,11 @@ def transcript_direct(video_id: str, proxy: str = ""):
 
 class NoCredits(RuntimeError):
     """Supadata ke credits khatam — ab is baar koshish ka koi fayda nahi."""
+
+
+class NotReady(RuntimeError):
+    """Video abhi live chal raha hai. Prasaran khatam hone par hi
+    transcript banega — isliye ye nakami ginati me nahi aati."""
 
 
 def credits_blocked_until(s=None):
@@ -446,8 +513,10 @@ def transcript_supadata(video_id: str, key: str):
     headers = {"x-api-key": key}
     watch = f"https://www.youtube.com/watch?v={video_id}"
     attempts = [
-        ("https://api.supadata.ai/v1/transcript", {"url": watch, "text": "true", "mode": "auto"}),
-        ("https://api.supadata.ai/v1/youtube/transcript", {"videoId": video_id, "text": "true"}),
+        ("https://api.supadata.ai/v1/transcript", {"url": watch, "mode": "auto"}),
+        ("https://api.supadata.ai/v1/youtube/transcript", {"videoId": video_id}),
+        ("https://api.supadata.ai/v1/transcript", {"url": watch, "text": "true",
+                                                  "mode": "auto"}),
     ]
     last_error = ""
     for url, params in attempts:
@@ -461,7 +530,11 @@ def transcript_supadata(video_id: str, key: str):
         if r.status_code == 429:
             raise NoCredits("Supadata credits for this month are used up.")
         if r.status_code >= 400:
-            last_error = f"{r.status_code} {r.text[:200]}"
+            body = r.text[:300]
+            if "live stream" in body.lower() or "currently live" in body.lower():
+                raise NotReady("This video is still live. Waiting for the stream "
+                               "to end.")
+            last_error = f"{r.status_code} {body[:200]}"
             continue
         data = r.json()
         job = data.get("jobId") or data.get("job_id")
@@ -493,12 +566,24 @@ def supadata_wait(job_id: str, headers, max_wait=600):
 
 
 def supadata_text(data) -> str:
+    """Tukde milen to samay ke nishan ke saath, warna saada text."""
     if isinstance(data, str):
         return re.sub(r"\s+", " ", data).strip()
     content = data.get("content") or data.get("text") or data.get("transcript")
     if isinstance(content, list):
-        content = " ".join(
-            (c.get("text", "") if isinstance(c, dict) else str(c)) for c in content)
+        segs = []
+        for c in content:
+            if isinstance(c, dict):
+                off = c.get("offset", c.get("start", c.get("startMs", 0))) or 0
+                off = float(off)
+                if off > 10000:            # milliseconds
+                    off = off / 1000.0
+                segs.append((off, c.get("text", "")))
+            else:
+                segs.append((0, str(c)))
+        if segs and any(x[0] for x in segs):
+            return blocks_from_segments(segs)
+        content = " ".join(x[1] for x in segs)
     if not content:
         return ""
     return re.sub(r"\s+", " ", str(content)).strip()
@@ -561,9 +646,53 @@ def llm(system: str, user: str, key: str, max_tokens=4000, tries=3):
     raise RuntimeError(f"No answer from OpenRouter. {last}")
 
 
+def to_english_stamped(text: str, key: str, on_step=None) -> str:
+    """Samay ke nishan jaise ke waise, sirf baat angrezi me."""
+    rows = split_stamped(text)
+    system = ("You translate spoken-word transcripts into clear, natural English. "
+              "You are given numbered lines. Return the SAME line numbers in the "
+              "same order, one per line, in the form 'N| translated text'. "
+              "Translate every line faithfully and completely. Do not merge lines, "
+              "do not drop lines, do not add commentary.")
+    out = list(rows)
+    batch, start, done = [], 0, 0
+    total = len(rows)
+
+    def run(batch, start):
+        if not batch:
+            return
+        body = "\n".join(f"{start + i + 1}| {t}" for i, t in enumerate(batch))
+        reply = llm(system, body, key, max_tokens=8000)
+        got = {}
+        for line in reply.split("\n"):
+            m = re.match(r"\s*(\d+)\s*\|\s*(.*)$", line)
+            if m:
+                got[int(m.group(1))] = m.group(2).strip()
+        for i in range(len(batch)):
+            n = start + i + 1
+            if got.get(n):
+                out[n - 1] = [rows[n - 1][0], got[n]]
+
+    for i, (mark, body) in enumerate(rows):
+        batch.append(body)
+        if sum(len(b) for b in batch) > 6000 or i == total - 1:
+            done += len(batch)
+            if on_step:
+                on_step(f"translating to English ({done}/{total} lines)")
+            run(batch, i - len(batch) + 1)
+            batch = []
+            gc.collect()
+    return "\n".join(f"{m} {t}".strip() for m, t in out)
+
+
 def to_english(text: str, key: str, on_step=None) -> str:
     if not is_devanagari(text):
         return text
+    if has_stamps(text):
+        try:
+            return to_english_stamped(text, key, on_step=on_step)
+        except Exception as ex:
+            log("wait", f"timed translation failed, falling back — {ex}")
     chunks = split_text(text, 9000)
     out = []
     system = ("You translate spoken-word transcripts into clear, natural English. "
@@ -591,6 +720,8 @@ def make_output(text: str, title: str, length: str, key: str,
     """Default me summary. Instruction di ho to wahi kaam hota hai —
     mukhya bindu, notes, sawaal-jawaab, lekh, jo bhi kaha jaye."""
     task = (instruction or "").strip() or DEFAULT_TASK
+    if has_stamps(text):
+        text = " ".join(t for _, t in split_stamped(text))
     target = {"short": "about 150 words",
               "medium": "about 350 words",
               "detailed": "about 700 words"}.get(length, "about 350 words")
@@ -702,9 +833,19 @@ def build_pdf(title, channel, date_str, link, episode, summary, transcript,
         story.append(Paragraph(esc(para.strip()), st_body))
 
     story += [PageBreak(), Paragraph("Full transcript", st_head)]
-    for para in [p for p in re.split(r"\n{1,}", transcript) if p.strip()]:
-        for piece in split_text(para.strip(), 3500):
-            story.append(Paragraph(esc(piece), st_body))
+    if has_stamps(transcript):
+        st_line = ParagraphStyle("tl", parent=st_body, spaceAfter=6, leftIndent=0)
+        for mark, body in split_stamped(transcript):
+            if not body.strip():
+                continue
+            for i, piece in enumerate(split_text(body.strip(), 3500)):
+                tag = (f'<font name="Courier-Bold" size="8" color="#1F6F5C">'
+                       f'{esc(mark)}</font>&nbsp;&nbsp;' if i == 0 and mark else "")
+                story.append(Paragraph(tag + esc(piece), st_line))
+    else:
+        for para in [p for p in re.split(r"\n{1,}", transcript) if p.strip()]:
+            for piece in split_text(para.strip(), 3500):
+                story.append(Paragraph(esc(piece), st_body))
 
     doc.build(story)
     return buf.getvalue()
@@ -827,9 +968,14 @@ def process_video(video, channel_name, s, recipients, episode_no, serial_no,
         subject = video["title"]
     body = (f"{video['title']}\n{channel_name} · {date_str}\n{video['link']}\n\n"
             f"{heading}\n\n{summary}\n\n"
-            f"Full transcript is in the attached PDF.\n")
+            + ("Full transcript is in the attached PDF.\n"
+               if s.get("attach_pdf", "yes") != "no"
+               else f"Full transcript: {up['link']}\n"))
+    attach = s.get("attach_pdf", "yes") != "no"
     if recipients:
-        gapi.send_mail(recipients, subject, body, attachment=pdf, attachment_name=fname)
+        gapi.send_mail(recipients, subject, body,
+                       attachment=pdf if attach else None,
+                       attachment_name=fname)
     log("mem", f"{memory_mb()} MB — {video['title'][:40]}")
 
     del pdf
@@ -986,6 +1132,9 @@ def run_check(manual=False):
                     clear_state(v["video_id"], states)
                     done += 1
                     free_memory()
+                except NotReady as e:
+                    log("wait", f"{v['title'][:60]} — {e}")
+                    continue
                 except NoCredits as e:
                     until = block_credits()
                     log("error", f"Supadata credits are used up. Pausing until "
@@ -1033,6 +1182,9 @@ def run_check(manual=False):
                 gapi.write_range("Queue", f"D{q['_row']}", [["done"]])
                 done += 1
                 free_memory()
+            except NotReady as ex:
+                log("wait", f"{q['Video Link']} — {ex}")
+                continue
             except NoCredits:
                 until = block_credits()
                 log("error", f"Supadata credits are used up. Pausing until "

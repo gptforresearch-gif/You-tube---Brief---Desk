@@ -24,7 +24,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
 HELPER_KEY = os.environ.get("HELPER_KEY", "")
-BUILD = "22"
+BUILD = "24"
 
 
 # ---------------------------------------------------------------- background
@@ -156,6 +156,8 @@ h2{font:600 24px/1.25 Georgia,serif;margin:0 0 4px}
 .btn:hover{filter:brightness(1.08)}
 .btn.ghost{background:#fff;color:var(--ink);border:1px solid var(--line)}
 .btn.small{padding:5px 11px;font-size:13px}
+.btn.wa{background:#25D366;color:#0B3B22;border:0;font-weight:600}
+.btn.wa:hover{filter:brightness(1.05)}
 input,select,textarea{font:inherit;padding:9px 11px;border:1px solid var(--line);
   border-radius:7px;background:#fff;color:var(--ink);width:100%}
 label{display:block;font-size:13px;color:var(--soft);margin:12px 0 4px}
@@ -677,6 +679,8 @@ def dashboard():
           <div class="row" style="margin-top:14px">
             <a class="btn small" href="{e(latest.get('PDF'))}" target="_blank">Open PDF</a>
             <a class="btn small ghost" href="{e(latest.get('Video Link'))}" target="_blank">Video</a>
+            <a class="btn small wa" href="{e(wa_link(latest, limit=int(s.get('whatsapp_length', '1200') or 1200)))}"
+               target="_blank" rel="noopener">WhatsApp</a>
             <a class="btn small ghost" href="/library">See all</a>
           </div></div>"""
     else:
@@ -749,6 +753,29 @@ def dashboard():
     }}, 4000);
     </script>"""
     return page("Dashboard", body, "/")
+
+
+def wa_link(row, phone="", limit=1200):
+    """WhatsApp kholne wala link, sandesh pehle se bhara hua."""
+    from urllib.parse import quote
+    title = (row.get("Title") or "").strip()
+    summary = re.sub(r"\s+\n", "\n", (row.get("Summary") or "").strip())
+    if len(summary) > limit:
+        summary = summary[:limit].rsplit(" ", 1)[0] + "…"
+    parts = [title]
+    if row.get("Channel") or row.get("Date"):
+        parts.append(f"{row.get('Channel', '')} · {row.get('Date', '')}".strip(" ·"))
+    parts += ["", summary, ""]
+    if row.get("Video Link"):
+        parts.append(f"Video: {row['Video Link']}")
+    if row.get("PDF"):
+        parts.append(f"PDF: {row['PDF']}")
+    text = quote("\n".join(p for p in parts if p is not None))
+    digits = re.sub(r"\D", "", phone or "")
+    if digits and len(digits) == 10:
+        digits = "91" + digits
+    return (f"https://wa.me/{digits}?text={text}" if digits
+            else f"https://wa.me/?text={text}")
 
 
 def safe_sheet_url():
@@ -867,16 +894,21 @@ def recipients():
             email = (request.form.get("email") or "").strip()
             if "@" not in email:
                 return back("/recipients", "That email address does not look right.", True)
-            gapi.append_row("Recipients", [email, request.form.get("name", ""), "yes"])
+            gapi.append_row("Recipients", [email, request.form.get("name", ""), "yes",
+                                           request.form.get("phone", "").strip()])
             return back("/recipients", "Added.")
-        keep = [[r.get("Email"), r.get("Name"), r.get("Active")]
+        keep = [[r.get("Email"), r.get("Name"), r.get("Active"), r.get("Phone")]
                 for r in rows if r.get("Email") != request.form.get("email")]
         gapi.replace_tab("Recipients", gapi.TABS["Recipients"], keep)
         return back("/recipients", "Removed.")
 
     rows = gapi.read_all()["recipients"]
-    trs = "".join(f"""<tr><td>{e(r.get('Email'))}<div class="note">{e(r.get('Name'))}</div></td>
-        <td style="text-align:right"><form method="post" style="margin:0">
+    latest = (gapi.read_all()["episodes"] or [{}])[-1]
+    trs = "".join(f"""<tr><td>{e(r.get('Email'))}
+        <div class="note">{e(r.get('Name'))} {e(r.get('Phone') or '')}</div></td>
+        <td style="text-align:right">
+        {f'<a class="btn small wa" target="_blank" rel="noopener" href="{e(wa_link(latest, r.get("Phone")))}">WhatsApp</a>&nbsp;' if r.get('Phone') and latest else ''}
+        <form method="post" style="margin:0;display:inline-block">
         <input type="hidden" name="action" value="delete">
         <input type="hidden" name="email" value="{e(r.get('Email'))}">
         <button class="btn small ghost">Remove</button></form></td></tr>""" for r in rows)
@@ -885,8 +917,10 @@ def recipients():
     <div class="card"><form method="post">
       <input type="hidden" name="action" value="add">
       <div class="grid"><div><label>Email</label>
-        <input name="email" type="email" placeholder="naam@example.com" required></div>
+        <input name="email" type="email" placeholder="name@example.com" required></div>
         <div><label>Name (optional)</label><input name="name"></div></div>
+      <label>WhatsApp number (optional — gives a one-tap button for this person)</label>
+      <input name="phone" placeholder="+91 98765 43210">
       <div style="margin-top:13px"><button class="btn">Add</button></div>
     </form></div>
     {'<div class="card"><table>' + trs + '</table></div>' if rows else
@@ -1091,6 +1125,8 @@ def library():
           <div class="row" style="margin-top:9px">
             <a class="btn small ghost" href="{e(r.get('PDF'))}" target="_blank">PDF</a>
             <a class="btn small ghost" href="{e(r.get('Video Link'))}" target="_blank">Video</a>
+            <a class="btn small wa" href="{e(wa_link(r))}" target="_blank"
+               rel="noopener">WhatsApp</a>
             <form method="post" action="/resend" style="margin:0">
               <input type="hidden" name="row" value="{r['_row']}">
               <input type="hidden" name="title" value="{e(r.get('Title'))}">
@@ -1152,6 +1188,8 @@ def settings_page():
             "summary_length": request.form.get("summary_length", "medium"),
             "lookback_days": request.form.get("lookback_days", "5"),
             "pdf_public": "yes" if request.form.get("pdf_public") else "no",
+            "attach_pdf": "yes" if request.form.get("attach_pdf") else "no",
+            "whatsapp_length": request.form.get("whatsapp_length", "1200").strip(),
             "paused": "yes" if request.form.get("paused") else "no",
             "check_every_hours": request.form.get("check_every_hours", "3"),
             "keep_awake": "yes" if request.form.get("keep_awake") else "no",
@@ -1202,7 +1240,17 @@ def settings_page():
       <input name="email_subject" value="{e(s.get('email_subject'))}">
       <div class="note" style="margin-top:5px">
         {{title}}, {{channel}}, {{date}}, {{episode}} — these are replaced with the real values.</div>
-      <label style="margin-top:16px">
+      <div class="grid" style="margin-top:12px">
+        <div><label>WhatsApp message length (characters)</label>
+          <input name="whatsapp_length" value="{e(s.get('whatsapp_length', '1200'))}"></div>
+        <div></div>
+      </div>
+      <label style="margin-top:10px">
+        <input type="checkbox" name="attach_pdf" style="width:auto"
+          {'checked' if s.get('attach_pdf', 'yes') == 'yes' else ''}>
+        Attach the PDF to the email (uncheck to send only the write-up, with a
+        link to the PDF)</label>
+      <label style="margin-top:6px">
         <input type="checkbox" name="pdf_public" style="width:auto"
           {'checked' if s.get('pdf_public') == 'yes' else ''}>
         Anyone with the PDF link can open it</label>

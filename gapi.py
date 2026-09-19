@@ -47,7 +47,7 @@ TABS = {
     "Inbox": ["Video ID", "Part", "Text", "Added"],
     "Channels": ["Channel ID", "Name", "Added On", "Active", "Sheet tab",
                  "Spreadsheet"],
-    "Recipients": ["Email", "Name", "Active"],
+    "Recipients": ["Email", "Name", "Active", "Phone"],
     "Settings": ["Key", "Value"],
     "State": ["Video ID", "Attempts", "Last Error", "Updated"],
     "Overflow": ["Video ID", "Part", "Text"],
@@ -263,7 +263,7 @@ def read_all(force=False):
         return _bundle["data"]
     tabs = data_tabs()
     ranges = [
-        "Channels!A2:F1000", "Recipients!A2:C1000", "Settings!A2:B300",
+        "Channels!A2:F1000", "Recipients!A2:D1000", "Settings!A2:B300",
         "State!A2:D5000", "Queue!A2:G2000", "Sheets!A2:D200", "Users!A2:J500",
     ]
     base = len(ranges)
