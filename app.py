@@ -24,7 +24,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
 HELPER_KEY = os.environ.get("HELPER_KEY", "")
-BUILD = "24"
+BUILD = "25"
 
 
 # ---------------------------------------------------------------- background
@@ -261,6 +261,7 @@ AUTH_OPEN = ("/login", "/register", "/verify", "/cron", "/static", "/oauth",
              "/healthz", "/forgot", "/manifest.webmanifest", "/icon-",
              "/sw.js", "/api/jobs", "/api/transcript")
 VIEWER_OK = ("/", "/library", "/logout", "/api/status", "/me")
+VIEWER_PREFIX = ("/photo/",)
 
 PENDING = {}          # email -> {"code", "until", "row"} — OTP ka intezaar
 OTP_MINUTES = 15
@@ -317,7 +318,8 @@ def guard():
     if (u.get("Status") or "").lower() == "blocked":
         session.clear()
         return redirect(url_for("login"))
-    if role_of(u) == "viewer" and request.path not in VIEWER_OK:
+    if (role_of(u) == "viewer" and request.path not in VIEWER_OK
+            and not request.path.startswith(VIEWER_PREFIX)):
         return back("/library", "You do not have access to that page.", True)
     if role_of(u) != "owner" and request.path == "/users" and request.method == "POST":
         return back("/users", "Only the owner can change people.", True)
@@ -555,23 +557,152 @@ def forgot():
     return auth_page("Password", inner)
 
 
-@app.route("/me")
+MAX_PHOTO = 4 * 1024 * 1024          # 4 MB tak ki tasveer
+PHOTO_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+
+
+def avatar(u, size=40):
+    """Tasveer ho to tasveer, warna naam ka pehla akshar."""
+    fid = (u or {}).get("Photo") or ""
+    if fid:
+        return (f'<img src="/photo/{e(fid)}" alt="" style="width:{size}px;'
+                f'height:{size}px;border-radius:50%;object-fit:cover;'
+                f'border:1px solid var(--line)">')
+    letter = ((u or {}).get("Name") or (u or {}).get("Email") or "?")[:1].upper()
+    return (f'<span style="display:inline-block;width:{size}px;height:{size}px;'
+            f'border-radius:50%;background:#EDEAE2;color:var(--soft);'
+            f'font:600 {int(size * 0.42)}px/{size}px Georgia,serif;'
+            f'text-align:center">{e(letter)}</span>')
+
+
+@app.route("/photo/<file_id>")
+def photo(file_id):
+    try:
+        data = gapi.download_file(file_id)
+    except Exception:
+        return Response(status=404)
+    return Response(data, mimetype="image/jpeg",
+                    headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.route("/me", methods=["GET", "POST"])
 def me():
     u = current_user() or {}
+    row = u.get("_row")
+
+    if request.method == "POST" and row:
+        f = request.form
+        try:
+            if f.get("action") == "photo":
+                up = request.files.get("photo")
+                if not up or not up.filename:
+                    return back("/me", "Please choose a picture first.", True)
+                raw = up.read(MAX_PHOTO + 1)
+                if len(raw) > MAX_PHOTO:
+                    return back("/me", "That picture is over 4 MB.", True)
+                kind = (up.mimetype or "").lower()
+                if kind not in PHOTO_TYPES:
+                    return back("/me", "Only JPG, PNG, WEBP or GIF pictures.", True)
+                old_id = u.get("Photo") or ""
+                fid = gapi.upload_image(f"{u.get('Email', 'user')}-photo", raw, kind)
+                gapi.write_range("Users", f"K{row}", [[fid]])
+                if old_id:
+                    gapi.delete_file(old_id)
+                return back("/me", "Picture updated.")
+
+            if f.get("action") == "remove_photo":
+                if u.get("Photo"):
+                    gapi.delete_file(u["Photo"])
+                gapi.write_range("Users", f"K{row}", [[""]])
+                return back("/me", "Picture removed.")
+
+            if f.get("action") == "password":
+                if not check_pw(u.get("Password"), f.get("old") or ""):
+                    return back("/me", "Your current password did not match.", True)
+                new = f.get("new") or ""
+                if len(new) < 6:
+                    return back("/me", "The new password needs 6 characters "
+                                "or more.", True)
+                if new != (f.get("new2") or ""):
+                    return back("/me", "The two new passwords do not match.", True)
+                gapi.write_range("Users", f"H{row}", [[hash_pw(new)]])
+                return back("/me", "Password changed.")
+
+            gapi.write_range("Users", f"B{row}:E{row}",
+                             [[f.get("name", "").strip(), f.get("phone", "").strip(),
+                               f.get("gender", "").strip(),
+                               f.get("address", "").strip()]])
+            return back("/me", "Saved.")
+        except Exception as ex:
+            return back("/me", f"Could not save: {ex}", True)
+
+    def sel(v):
+        return "selected" if (u.get("Gender") or "") == v else ""
+
+    remove_form = ""
+    if u.get("Photo"):
+        remove_form = ('<form method="post" style="margin-top:8px">'
+                       '<input type="hidden" name="action" value="remove_photo">'
+                       '<button class="btn small ghost">Remove picture</button></form>')
+
     body = f"""<h2>My account</h2>
     <div class="card">
-      <div class="grid"><div>
-        <div class="note">Name</div><div>{e(u.get('Name'))}</div>
-        <div class="note" style="margin-top:10px">Email</div><div>{e(u.get('Email'))}</div>
-        <div class="note" style="margin-top:10px">Phone</div><div>{e(u.get('Phone'))}</div>
-      </div><div>
-        <div class="note">Role</div><div>{e(u.get('Role'))}</div>
-        <div class="note" style="margin-top:10px">Gender</div><div>{e(u.get('Gender'))}</div>
-        <div class="note" style="margin-top:10px">Address</div><div>{e(u.get('Address'))}</div>
-      </div></div>
-      <div class="row" style="margin-top:16px">
-        <a class="btn small ghost" href="/logout">Sign out</a></div>
-    </div>"""
+      <div class="row" style="align-items:center;gap:14px">
+        {avatar(u, 72)}
+        <div>
+          <div style="font:600 17px/1.3 Georgia,serif">{e(u.get('Name') or '—')}</div>
+          <div class="note">{e(u.get('Email'))} &nbsp;·&nbsp;
+            <span class="tag">{e(role_of(u))}</span></div>
+          <div class="note">last seen {e(u.get('Last seen') or '—')}</div>
+        </div>
+      </div>
+      <form method="post" enctype="multipart/form-data" style="margin-top:14px">
+        <input type="hidden" name="action" value="photo">
+        <label>Change picture (JPG, PNG or WEBP — up to 4 MB)</label>
+        <input type="file" name="photo" accept="image/*">
+        <div class="row" style="margin-top:11px">
+          <button class="btn small">Upload</button></div>
+      </form>
+      {remove_form}
+    </div>
+
+    <div class="card"><form method="post">
+      <div class="grid">
+        <div><label>Full name</label>
+          <input name="name" value="{e(u.get('Name'))}"></div>
+        <div><label>Mobile number</label>
+          <input name="phone" value="{e(u.get('Phone'))}"></div>
+      </div>
+      <div class="grid" style="margin-top:10px">
+        <div><label>Gender</label>
+          <select name="gender">
+            <option value="" {sel('')}>Prefer not to say</option>
+            <option {sel('Female')}>Female</option>
+            <option {sel('Male')}>Male</option>
+            <option {sel('Other')}>Other</option>
+          </select></div>
+        <div></div>
+      </div>
+      <label>Address</label>
+      <textarea name="address" rows="2">{e(u.get('Address'))}</textarea>
+      <div style="margin-top:13px"><button class="btn">Save</button></div>
+    </form></div>
+
+    <div class="card"><form method="post">
+      <input type="hidden" name="action" value="password">
+      <div class="note" style="margin-bottom:8px">Change password</div>
+      <div class="grid">
+        <div><label>Current password</label>
+          <input type="password" name="old"></div>
+        <div><label>New password</label>
+          <input type="password" name="new"></div>
+      </div>
+      <label>Repeat new password</label>
+      <input type="password" name="new2">
+      <div style="margin-top:13px"><button class="btn">Change password</button></div>
+    </form></div>
+
+    <div class="card"><a class="btn small ghost" href="/logout">Sign out</a></div>"""
     return page("My account", body, "/me")
 
 
@@ -629,7 +760,8 @@ def users_page():
               <button class="btn small ghost" name="action" value="block">Block</button>
               <button class="btn small ghost" name="action" value="delete">Remove</button>
             </form>"""
-        return f"""<tr><td><strong>{e(u.get('Name') or u.get('Email'))}</strong>
+        return f"""<tr><td style="width:52px;vertical-align:top">{avatar(u, 40)}</td>
+            <td><strong>{e(u.get('Name') or u.get('Email'))}</strong>
             <span class="{tag}" style="margin-left:7px">{e(st)}</span>
             <span class="tag" style="margin-left:4px">{e(role_of(u))}</span>
             <div class="note" style="margin-top:5px">{e(u.get('Email'))}

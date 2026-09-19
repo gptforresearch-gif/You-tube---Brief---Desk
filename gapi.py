@@ -43,7 +43,7 @@ TABS = {
               "Spreadsheet"],
     "Sheets": ["Name", "Spreadsheet ID", "Link", "Added"],
     "Users": ["Email", "Name", "Phone", "Gender", "Address", "Role", "Status",
-              "Password", "Added", "Last seen"],
+              "Password", "Added", "Last seen", "Photo"],
     "Inbox": ["Video ID", "Part", "Text", "Added"],
     "Channels": ["Channel ID", "Name", "Added On", "Active", "Sheet tab",
                  "Spreadsheet"],
@@ -264,7 +264,7 @@ def read_all(force=False):
     tabs = data_tabs()
     ranges = [
         "Channels!A2:F1000", "Recipients!A2:D1000", "Settings!A2:B300",
-        "State!A2:D5000", "Queue!A2:G2000", "Sheets!A2:D200", "Users!A2:J500",
+        "State!A2:D5000", "Queue!A2:G2000", "Sheets!A2:D200", "Users!A2:K500",
     ]
     base = len(ranges)
     for t in tabs:
@@ -618,6 +618,28 @@ def upload_pdf(filename: str, data: bytes, yyyy_mm: str, public: bool = True) ->
         except Exception:
             pass
     return {"id": f["id"], "link": f.get("webViewLink", "")}
+
+
+def upload_image(filename: str, data: bytes, mimetype: str) -> str:
+    """Profile ki tasveer Drive me. File ka id lautata hai."""
+    drive = _svc("drive", "v3")
+    if not _cache.get("photo_folder"):
+        if not _cache.get("root_folder"):
+            _cache["root_folder"] = _find_or_create_folder(DRIVE_ROOT_NAME)
+        _cache["photo_folder"] = _find_or_create_folder("Profile photos",
+                                                        _cache["root_folder"])
+    media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=False)
+    f = drive.files().create(body={"name": filename,
+                                   "parents": [_cache["photo_folder"]]},
+                             media_body=media, fields="id").execute()
+    return f["id"]
+
+
+def delete_file(file_id: str):
+    try:
+        _svc("drive", "v3").files().delete(fileId=file_id).execute()
+    except Exception:
+        pass
 
 
 def download_file(file_id: str) -> bytes:
