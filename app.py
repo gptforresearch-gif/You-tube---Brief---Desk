@@ -24,7 +24,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
 HELPER_KEY = os.environ.get("HELPER_KEY", "")
-BUILD = "25"
+BUILD = "27"
 
 
 # ---------------------------------------------------------------- background
@@ -1327,7 +1327,8 @@ def settings_page():
             "keep_awake": "yes" if request.form.get("keep_awake") else "no",
             "email_subject": request.form.get("email_subject", "{title}"),
             "output_instruction": request.form.get("output_instruction", "").strip(),
-            "output_title": request.form.get("output_title", "Summary").strip(),
+            "output_title": request.form.get("output_title", "").strip(),
+            "output_style": request.form.get("output_style", "timeline"),
             "openrouter_key": request.form.get("openrouter_key", "").strip(),
             "supadata_key": request.form.get("supadata_key", "").strip(),
             "proxy_url": request.form.get("proxy_url", "").strip(),
@@ -1358,14 +1359,21 @@ def settings_page():
         <div><label>Check for new videos every (hours)</label>
           <input name="check_every_hours" value="{e(s.get('check_every_hours', '3'))}"></div>
       </div>
-      <label>What should be written for every video?</label>
+      <label>How should each video be written up?</label>
+      <select name="output_style">
+        <option value="timeline" {'selected' if s.get('output_style', 'timeline') == 'timeline' else ''}>Detailed timestamp summary — sections with time ranges</option>
+        <option value="summary" {'selected' if s.get('output_style') == 'summary' else ''}>One plain summary</option>
+      </select>
+      <label style="margin-top:12px">Or write your own instruction (this overrides
+        the choice above)</label>
       <textarea name="output_instruction" rows="4"
-        placeholder="Leave blank for a plain English summary. Or write your own, e.g.
+        placeholder="Leave blank to use the choice above. Or write your own, e.g.
 &quot;Pull out every legal point and list it with the reasoning&quot;, or
 &quot;Write detailed study notes with headings&quot;.">{e(s.get('output_instruction'))}</textarea>
       <div class="grid" style="margin-top:12px">
         <div><label>Heading for that section (in the PDF and email)</label>
-          <input name="output_title" value="{e(s.get('output_title') or 'Summary')}"></div>
+          <input name="output_title" value="{e(s.get('output_title'))}"
+            placeholder="leave blank to pick automatically"></div>
         <div></div>
       </div>
       <label>Email subject</label>

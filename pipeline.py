@@ -19,7 +19,7 @@ import gc
 import gapi
 import fonts
 
-BUILD = "26"
+BUILD = "27"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -41,6 +41,7 @@ DEFAULTS = {
     "email_subject": "{title}",
     "output_instruction": "",
     "output_title": "Summary",
+    "output_style": "timeline",     # timeline | summary
     "sms_provider": "",          # "" | fast2sms | twilio
     "fast2sms_key": "",
     "twilio_sid": "",
@@ -780,11 +781,57 @@ DEFAULT_TASK = ("Write a clear English summary of this talk. Plain prose, no "
                 "watch the video.")
 
 
+TIMELINE_SYSTEM = (
+    "You write a detailed timestamp summary of a recorded talk. You are given a "
+    "transcript in which each paragraph begins with its start time, like [00:16].\n\n"
+    "Produce numbered sections. Each section is exactly two parts:\n"
+    "  a heading line:  N. START-END - Short headline\n"
+    "  then one paragraph of 2 to 5 sentences saying what was actually said.\n\n"
+    "Rules: take the times from the transcript itself; START is the start time of "
+    "the first paragraph in the section and END is the start time of the next "
+    "section. Write times as m:ss, or h:mm:ss past an hour. Join neighbouring "
+    "paragraphs that belong to the same point, so each section is one topic — "
+    "usually 20 seconds to 3 minutes. Write in plain English. Attribute claims to "
+    "the speaker rather than stating them as fact. Invent nothing. Output the "
+    "sections only, with a blank line between them.")
+
+
+def make_timeline(text: str, title: str, key: str, on_step=None) -> str:
+    """Samay ki seema, uska sheershak, aur us hisse ki baat."""
+    chunks = split_text(text, 24000)
+    parts, total = [], len(chunks)
+    for i in range(total):
+        if on_step:
+            on_step(f"laying out the timeline ({i + 1}/{total})")
+        tail = ("\n\nThis is part %d of %d — keep going from where the previous "
+                "part ended, and do not repeat it." % (i + 1, total)) if total > 1 else ""
+        parts.append(llm(TIMELINE_SYSTEM,
+                         f"Title: {title}{tail}\n\nTranscript:\n{chunks[i]}",
+                         key, max_tokens=6000))
+        chunks[i] = ""
+        gc.collect()
+
+    # sab tukdon ke number ek hi kram me
+    out, n = [], 0
+    for block in parts:
+        for line in block.split("\n"):
+            m = re.match(r"\s*\d+[.)]\s*(.*)$", line)
+            if m and re.match(r"\s*\d", m.group(1)):
+                n += 1
+                out.append(f"{n}. {m.group(1).strip()}")
+            else:
+                out.append(line.rstrip())
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
+
 def make_output(text: str, title: str, length: str, key: str,
-                instruction: str = "", on_step=None) -> str:
+                instruction: str = "", on_step=None, style: str = "") -> str:
     """Default me summary. Instruction di ho to wahi kaam hota hai —
     mukhya bindu, notes, sawaal-jawaab, lekh, jo bhi kaha jaye."""
-    task = (instruction or "").strip() or DEFAULT_TASK
+    task = (instruction or "").strip()
+    if not task and style == "timeline" and has_stamps(text):
+        return make_timeline(text, title, key, on_step=on_step)
+    task = task or DEFAULT_TASK
     if has_stamps(text):
         text = " ".join(t for _, t in split_stamped(text))
     target = {"short": "about 150 words",
@@ -883,6 +930,13 @@ def build_pdf(title, channel, date_str, link, episode, summary, transcript,
                              fontSize=11, leading=16.5, textColor=ink,
                              spaceAfter=9, alignment=4)
 
+    st_sec = ParagraphStyle("sec", parent=base["Normal"], fontName="Times-Bold",
+                            fontSize=11, leading=15.5, textColor=ink,
+                            spaceBefore=12, spaceAfter=4)
+    SEC_RE = re.compile(r"^\s*(\d+)[.)]\s*"
+                        r"([\d:]+\s*[\u2013\u2014-]\s*[\d:]+)?\s*"
+                        r"[\u2013\u2014-]?\s*(.*)$")
+
     story = [Paragraph(esc(title), st_title)]
     meta = f"{channel} &nbsp;·&nbsp; {date_str}"
     if episode:
@@ -895,7 +949,15 @@ def build_pdf(title, channel, date_str, link, episode, summary, transcript,
         Paragraph(heading, st_head),
     ]
     for para in [p for p in summary.split("\n") if p.strip()]:
-        story.append(Paragraph(esc(para.strip()), st_body))
+        para = para.strip()
+        m = SEC_RE.match(para)
+        if m and m.group(2):
+            num, span, head = m.group(1), m.group(2).strip(), m.group(3).strip()
+            story.append(Paragraph(
+                f'{num}.&nbsp;&nbsp;<font color="#1F6F5C">{esc(span)}</font>'
+                f'&nbsp;&nbsp;{esc(head)}', st_sec))
+        else:
+            story.append(Paragraph(esc(para), st_body))
 
     story += [PageBreak(), Paragraph("Full transcript", st_head)]
     if has_stamps(transcript):
@@ -987,8 +1049,12 @@ def process_video(video, channel_name, s, recipients, episode_no, serial_no,
     task = instruction if instruction is not None else s.get("output_instruction", "")
     heading = (s.get("output_title") or "Summary").strip() or "Summary"
     step("writing")
+    style = s.get("output_style", "timeline")
+    if not (s.get("output_title") or "").strip():
+        heading = ("Detailed Timestamp Summary" if style == "timeline" else "Summary")
     summary = make_output(english, video["title"], s.get("summary_length", "medium"),
-                          key, instruction=task, on_step=lambda m: step(m))
+                          key, instruction=task, on_step=lambda m: step(m),
+                          style=style)
     gc.collect()
     mark("after writing")
 
