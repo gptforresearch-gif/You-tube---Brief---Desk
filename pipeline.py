@@ -19,7 +19,7 @@ import gc
 import gapi
 import fonts
 
-BUILD = "25"
+BUILD = "26"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -125,7 +125,13 @@ def split_text(text: str, max_chars: int):
 
 # ------------------------------------------------------------ samay ke nishan
 
-BLOCK_SECONDS = 30       # har itne second par ek nishan
+# Samay ka nishan wahan lagta hai jahan baat sachmuch badalti hai —
+# gine hue tees-tees second par nahi.
+SHORT_MIN = 14           # chuppi ke baad tootne ke liye itna to bole
+SOFT_BLOCK = 95          # chuppi na mile to itni der baad vaakya par tod do
+MAX_BLOCK = 240          # itne se bada tukda kabhi nahi
+PAUSE = 1.2              # itni der ki chuppi = baat badalne ka ishaara
+BLOCK_SECONDS = 30       # purane tareeke ke liye
 
 
 def stamp(seconds) -> str:
@@ -136,6 +142,57 @@ def stamp(seconds) -> str:
     h, rest = divmod(max(sec, 0), 3600)
     m, sc = divmod(rest, 60)
     return f"[{h}:{m:02d}:{sc:02d}]" if h else f"[{m:02d}:{sc:02d}]"
+
+
+ENDS = ("।", "॥", ".", "?", "!", "|")
+
+
+def _ends_sentence(text: str) -> bool:
+    t = (text or "").rstrip().rstrip('"\'”’)')
+    return bool(t) and t[-1] in ENDS
+
+
+def natural_blocks(segments) -> str:
+    """[(shuru, avadhi, baat), ...] -> paragraph, har ek apne samay ke saath.
+
+    Tukda wahin tootta hai jahan vaakya poora hua ho aur ya to kaafi der
+    beet chuki ho, ya bolne wale ne saans li ho. Isse har paragraph ek
+    poori baat banta hai, aadha-adhoora nahi."""
+    rows = []
+    for seg in segments:
+        if len(seg) == 3:
+            st, dur, text = seg
+        else:
+            st, text = seg
+            dur = 0
+        text = re.sub(r"\s+", " ", (text or "")).strip()
+        if text:
+            rows.append((float(st or 0), float(dur or 0), text))
+    if not rows:
+        return ""
+
+    out, cur, start = [], [], rows[0][0]
+    for i, (st, dur, text) in enumerate(rows):
+        cur.append(text)
+        spent = st + dur - start
+        nxt = rows[i + 1][0] if i + 1 < len(rows) else None
+        gap = (nxt - (st + dur)) if (nxt is not None and dur) else 0
+
+        done = False
+        if _ends_sentence(text):
+            if gap >= PAUSE and spent >= SHORT_MIN:
+                done = True            # bolne wale ne saans li — baat badli
+            elif spent >= SOFT_BLOCK:
+                done = True            # chuppi nahi mili, par kaafi der ho gayi
+        if spent >= MAX_BLOCK and (_ends_sentence(text) or gap >= 0.5):
+            done = True                # itna lamba tukda padhne me bhaari
+
+        if done and nxt is not None:
+            out.append(f"{stamp(start)} {' '.join(cur)}")
+            cur, start = [], nxt
+    if cur:
+        out.append(f"{stamp(start)} {' '.join(cur)}")
+    return "\n".join(out)
 
 
 def blocks_from_segments(segments, every=BLOCK_SECONDS) -> str:
@@ -463,14 +520,20 @@ def transcript_direct(video_id: str, proxy: str = ""):
                 api = YouTubeTranscriptApi()
             fetched = api.fetch(video_id)
             snippets = getattr(fetched, "snippets", fetched)
-            segs = [(getattr(sn, "start", 0) if not isinstance(sn, dict)
-                     else sn.get("start", 0),
-                     getattr(sn, "text", "") if not isinstance(sn, dict)
-                     else sn.get("text", "")) for sn in snippets]
-            text = blocks_from_segments(segs)
+            segs = []
+            for sn in snippets:
+                if isinstance(sn, dict):
+                    segs.append((sn.get("start", 0), sn.get("duration", 0),
+                                 sn.get("text", "")))
+                else:
+                    segs.append((getattr(sn, "start", 0),
+                                 getattr(sn, "duration", 0),
+                                 getattr(sn, "text", "")))
+            text = natural_blocks(segs)
         except Exception:
             data = YouTubeTranscriptApi.get_transcript(video_id)
-            text = blocks_from_segments([(d.get("start", 0), d["text"]) for d in data])
+            text = natural_blocks([(d.get("start", 0), d.get("duration", 0),
+                                    d["text"]) for d in data])
         return text if len(text) > 200 else None
     except Exception:
         return None
@@ -574,16 +637,18 @@ def supadata_text(data) -> str:
         segs = []
         for c in content:
             if isinstance(c, dict):
-                off = c.get("offset", c.get("start", c.get("startMs", 0))) or 0
-                off = float(off)
+                off = float(c.get("offset", c.get("start", c.get("startMs", 0))) or 0)
+                dur = float(c.get("duration", c.get("durationMs", 0)) or 0)
                 if off > 10000:            # milliseconds
-                    off = off / 1000.0
-                segs.append((off, c.get("text", "")))
+                    off, dur = off / 1000.0, dur / 1000.0
+                elif dur > 1000:
+                    dur = dur / 1000.0
+                segs.append((off, dur, c.get("text", "")))
             else:
-                segs.append((0, str(c)))
+                segs.append((0, 0, str(c)))
         if segs and any(x[0] for x in segs):
-            return blocks_from_segments(segs)
-        content = " ".join(x[1] for x in segs)
+            return natural_blocks(segs)
+        content = " ".join(x[2] for x in segs)
     if not content:
         return ""
     return re.sub(r"\s+", " ", str(content)).strip()

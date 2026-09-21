@@ -26,7 +26,7 @@ HELPER_KEY = "PASTE-YOUR-HELPER-KEY-HERE"             # Render me daali gayi HEL
 
 EVERY_MINUTES = 10        # kitni-kitni der me poochhe
 
-VERSION = "3"
+VERSION = "4"
 
 # ------------------------------------------------------------------------------
 
@@ -42,7 +42,10 @@ def fetch_transcript(video_id):
     Hindi, gujarati, angrezi, kuch bhi. Anuvaad app khud kar leti hai."""
     from youtube_transcript_api import YouTubeTranscriptApi
 
-    BLOCK = 30      # har 30 second par ek samay ka nishan
+    # Samay ka nishan wahin lagta hai jahan baat badalti hai —
+    # gine hue second par nahi.
+    SHORT_MIN, SOFT, MAX_B, PAUSE = 14, 95, 240, 1.2
+    ENDS = ("।", "॥", ".", "?", "!", "|")
 
     def stamp(sec):
         sec = int(sec or 0)
@@ -50,28 +53,44 @@ def fetch_transcript(video_id):
         m, s = divmod(rest, 60)
         return f"[{h}:{m:02d}:{s:02d}]" if h else f"[{m:02d}:{s:02d}]"
 
+    def ends(t):
+        t = (t or "").rstrip().rstrip('"\'\u201d\u2019)')
+        return bool(t) and t[-1] in ENDS
+
     def join(snippets):
-        """Samay ke nishan ke saath — har 30 second par."""
-        segs = []
+        rows = []
         for sn in snippets:
             if isinstance(sn, dict):
-                segs.append((sn.get("start", 0) or 0, sn.get("text", "")))
+                st, du, tx = sn.get("start", 0), sn.get("duration", 0), sn.get("text", "")
             else:
-                segs.append((getattr(sn, "start", 0) or 0, getattr(sn, "text", "")))
-        lines, cur, start = [], [], None
-        for sec, text in segs:
-            text = " ".join((text or "").split())
-            if not text:
-                continue
-            if start is None:
-                start = sec
-            if sec - start >= BLOCK and cur:
-                lines.append(f"{stamp(start)} {' '.join(cur)}")
-                cur, start = [], sec
-            cur.append(text)
+                st = getattr(sn, "start", 0)
+                du = getattr(sn, "duration", 0)
+                tx = getattr(sn, "text", "")
+            tx = " ".join((tx or "").split())
+            if tx:
+                rows.append((float(st or 0), float(du or 0), tx))
+        if not rows:
+            return ""
+        out, cur, start = [], [], rows[0][0]
+        for i, (st, du, tx) in enumerate(rows):
+            cur.append(tx)
+            spent = st + du - start
+            nxt = rows[i + 1][0] if i + 1 < len(rows) else None
+            gap = (nxt - (st + du)) if (nxt is not None and du) else 0
+            done = False
+            if ends(tx):
+                if gap >= PAUSE and spent >= SHORT_MIN:
+                    done = True
+                elif spent >= SOFT:
+                    done = True
+            if spent >= MAX_B and (ends(tx) or gap >= 0.5):
+                done = True
+            if done and nxt is not None:
+                out.append(f"{stamp(start)} {' '.join(cur)}")
+                cur, start = [], nxt
         if cur:
-            lines.append(f"{stamp(start or 0)} {' '.join(cur)}")
-        return "\n".join(lines)
+            out.append(f"{stamp(start)} {' '.join(cur)}")
+        return "\n".join(out)
 
     # naya tareeka (version 1.x)
     try:
