@@ -40,11 +40,12 @@ TABS = {
     "Episodes": EPISODE_HEADER,
     "Links": EPISODE_HEADER,
     "Queue": ["Video Link", "Added", "Emails", "Status", "Instruction", "Sheet tab",
-              "Spreadsheet"],
+              "Spreadsheet", "Replace row"],
     "Sheets": ["Name", "Spreadsheet ID", "Link", "Added"],
     "Users": ["Email", "Name", "Phone", "Gender", "Address", "Role", "Status",
               "Password", "Added", "Last seen", "Photo"],
     "Inbox": ["Video ID", "Part", "Text", "Added"],
+    "Outbox": ["Created", "Target", "Text", "Status", "Video ID"],
     "Channels": ["Channel ID", "Name", "Added On", "Active", "Sheet tab",
                  "Spreadsheet"],
     "Recipients": ["Email", "Name", "Active", "Phone"],
@@ -57,7 +58,7 @@ TABS = {
 import time as _time
 
 SYSTEM_TABS = {"Channels", "Recipients", "Settings", "State", "Overflow",
-               "Log", "Queue", "Sheets", "Users", "Inbox"}
+               "Log", "Queue", "Sheets", "Users", "Inbox", "Outbox"}
 MAIN = "Main"
 MAX_DATA_TABS = 12
 
@@ -264,7 +265,7 @@ def read_all(force=False):
     tabs = data_tabs()
     ranges = [
         "Channels!A2:F1000", "Recipients!A2:D1000", "Settings!A2:B300",
-        "State!A2:D5000", "Queue!A2:G2000", "Sheets!A2:D200", "Users!A2:K500",
+        "State!A2:D5000", "Queue!A2:H2000", "Sheets!A2:D200", "Users!A2:K500", "Outbox!A2:E3000",
     ]
     base = len(ranges)
     for t in tabs:
@@ -320,6 +321,7 @@ def read_all(force=False):
         "queue": rows(vr[4], TABS["Queue"]),
         "sheets": rows(vr[5], TABS["Sheets"]),
         "users": rows(vr[6], TABS["Users"]),
+        "outbox": rows(vr[7], TABS["Outbox"]),
     }
     _bundle.update({"at": _time.time(), "data": data})
     return data
@@ -542,6 +544,16 @@ def append_rows_in(sid: str, tab: str, rows: list):
         invalidate()
 
 
+def update_row_in(sid: str, tab: str, row: int, values: list):
+    """Kisi bhi spreadsheet ki ek poori pankti badal do."""
+    target = sid or spreadsheet_id()
+    _svc("sheets", "v4").spreadsheets().values().update(
+        spreadsheetId=target, range=f"{tab}!A{row}:K{row}",
+        valueInputOption="USER_ENTERED", body={"values": [values]}).execute()
+    if target == spreadsheet_id():
+        invalidate()
+
+
 def rows_in(sid: str, tab: str):
     """Kisi bhi spreadsheet ke ek tab ki rows — Transcript column chhod kar."""
     if not sid or sid == spreadsheet_id():
@@ -601,6 +613,8 @@ def drive_root_url() -> str:
 
 
 def upload_pdf(filename: str, data: bytes, yyyy_mm: str, public: bool = True) -> dict:
+    if not data:
+        raise RuntimeError("The PDF came out empty, so nothing was uploaded.")
     drive = _svc("drive", "v3")
     media = MediaIoBaseUpload(io.BytesIO(data), mimetype="application/pdf",
                               resumable=False)
@@ -666,6 +680,8 @@ def send_mail(to_list, subject, body_text, attachment=None, attachment_name=None
     msg["Subject"] = subject
     msg.attach(MIMEText(body_text, "plain", "utf-8"))
     if attachment:
+        if not isinstance(attachment, (bytes, bytearray)):
+            attachment = bytes(attachment or b"")
         part = MIMEApplication(attachment, _subtype="pdf")
         part.add_header("Content-Disposition", "attachment",
                         filename=attachment_name or "brief.pdf")

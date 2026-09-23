@@ -24,7 +24,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
 HELPER_KEY = os.environ.get("HELPER_KEY", "")
-BUILD = "27"
+BUILD = "30"
 
 
 # ---------------------------------------------------------------- background
@@ -249,7 +249,11 @@ def page(title, body, active="/"):
 
 
 def back(where, msg="", bad=False):
-    q = f"?msg={msg}" + ("&bad=1" if bad else "") if msg else ""
+    if not msg:
+        return redirect(where)
+    from urllib.parse import quote
+    joiner = "&" if "?" in where else "?"
+    q = f"{joiner}msg={quote(str(msg))}" + ("&bad=1" if bad else "")
     return redirect(where + q)
 
 
@@ -1263,6 +1267,12 @@ def library():
               <input type="hidden" name="row" value="{r['_row']}">
               <input type="hidden" name="title" value="{e(r.get('Title'))}">
               <button class="btn small ghost">Email again</button></form>
+            <form method="post" action="/rebuild" style="margin:0">
+              <input type="hidden" name="book" value="{e(book)}">
+              <input type="hidden" name="tab" value="{e(which)}">
+              <input type="hidden" name="rows" value="{r['_row']}">
+              <button class="btn small ghost"
+                title="Fetch the transcript again and write it in the new format">Rebuild</button></form>
           </div></td></tr>""" for r in rows[:200])
     books = [gapi.MAIN] + [(sh.get("Name") or "") for sh in data["sheets"]
                            if sh.get("Name")]
@@ -1280,10 +1290,56 @@ def library():
       <input type="hidden" name="book" value="{e(book)}">
       <input type="hidden" name="tab" value="{e(which)}">
       <input name="q" value="{e(q)}" placeholder="search title or summary"
-        style="flex:1;min-width:200px"><button class="btn">Search</button></div></form>
+        style="flex:1;min-width:200px"><button class="btn">Search</button>
+      </div></form>
+    <form method="post" action="/rebuild" class="card"
+      onsubmit="return confirm('Rebuild every episode in this tab? Each one fetches its transcript again, which uses transcript credits.')">
+      <input type="hidden" name="book" value="{e(book)}">
+      <input type="hidden" name="tab" value="{e(which)}">
+      <input type="hidden" name="rows" value="all">
+      <div class="row" style="justify-content:space-between">
+        <div class="note">Rebuild every episode here in the new
+          timestamped format. Rows and Sr.No. stay the same, and no email is sent.</div>
+        <button class="btn small ghost">Rebuild all</button>
+      </div></form>
     {'<div class="card"><table>' + trs + '</table></div>' if rows else
      '<p class="note">Nothing found.</p>'}"""
     return page("Library", body, "/library")
+
+
+@app.route("/rebuild", methods=["POST"])
+def rebuild():
+    if role_of(current_user()) not in ("owner", "admin"):
+        return back("/library", "Only the owner can do that.", True)
+    book = (request.form.get("book") or gapi.MAIN).strip()
+    tab = (request.form.get("tab") or "Episodes").strip()
+    which = request.form.get("rows") or ""
+    data = gapi.read_all(force=True)
+
+    sid = ""
+    if book != gapi.MAIN:
+        for sh in data["sheets"]:
+            if (sh.get("Name") or "") == book:
+                sid = (sh.get("Spreadsheet ID") or "").strip()
+    try:
+        rows = gapi.rows_in(sid, tab)
+    except Exception as ex:
+        return back(f"/library?book={book}&tab={tab}", f"Could not read: {ex}", True)
+
+    if which == "all":
+        picked = [r for r in rows if r.get("Video Link")][-60:]
+    else:
+        picked = [r for r in rows if str(r["_row"]) == which]
+    if not picked:
+        return back(f"/library?book={book}&tab={tab}", "Nothing to rebuild.", True)
+
+    today = dt.date.today().strftime("%d %b %Y")
+    gapi.append_rows("Queue", [[r["Video Link"], today, "", "pending", "", tab,
+                                book, r["_row"]] for r in picked])
+    pipeline.run_in_background(manual=True)
+    return back(f"/library?book={book}&tab={tab}",
+                f"{len(picked)} episode(s) queued for a rebuild. They keep their "
+                "row and Sr.No.; no email goes out.")
 
 
 @app.route("/resend", methods=["POST"])
@@ -1316,6 +1372,18 @@ def settings_page():
     if not gapi.has_token():
         return page("Settings", SETUP_BODY, "/settings")
     if request.method == "POST":
+        sup = request.form.get("supadata_key", "").strip()
+        orr = request.form.get("openrouter_key", "").strip()
+        prox = request.form.get("proxy_url", "").strip()
+        if sup.startswith("sk-or"):
+            return back("/settings", "That looks like an OpenRouter key, not a "
+                        "Supadata key. Each one goes in its own box.", True)
+        if orr and not orr.startswith("sk-"):
+            return back("/settings", "An OpenRouter key starts with sk-. Please "
+                        "check that box.", True)
+        if prox and not re.match(r"^(https?|socks5h?)://", prox):
+            return back("/settings", "A proxy address must start with http:// , "
+                        "https:// or socks5:// — or leave the box empty.", True)
         gapi.set_settings({
             "summary_length": request.form.get("summary_length", "medium"),
             "lookback_days": request.form.get("lookback_days", "5"),

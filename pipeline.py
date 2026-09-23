@@ -15,11 +15,13 @@ import xml.etree.ElementTree as ET
 import requests
 
 import gc
+import sys
+import traceback
 
 import gapi
 import fonts
 
-BUILD = "27"
+BUILD = "30"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -96,12 +98,20 @@ def supadata_key(s=None):
             or s.get("supadata_key") or SUPADATA_API_KEY or "").strip()
 
 
+SECRET_RE = re.compile(r"(sk-or-v1-|sk-|sd_|Bearer\s+)[A-Za-z0-9_\-]{8,}")
+
+
+def hide_keys(text: str) -> str:
+    """Koi bhi key galti se log me na chali jaye."""
+    return SECRET_RE.sub(lambda m: m.group(1) + "…hidden…", str(text))
+
+
 def log(level, message):
     try:
-        gapi.append_row("Log", [now_str(), level, str(message)[:2000]])
+        gapi.append_row("Log", [now_str(), level, hide_keys(message)[:2000]])
     except Exception:
         pass
-    print(f"[{level}] {message}", flush=True)
+    print(f"[{level}] {hide_keys(message)}", flush=True)
 
 
 def is_devanagari(text: str) -> bool:
@@ -385,6 +395,10 @@ def fetch_feed(cid: str) -> dict:
 def fetch_feed_rss(cid: str) -> dict:
     url = f"https://www.youtube.com/feeds/videos.xml?channel_id={cid}"
     r = requests.get(url, headers={"User-Agent": UA}, timeout=25)
+    if r.status_code == 404:
+        raise RuntimeError(
+            f"YouTube does not know the channel id {cid}. On YouTube open the "
+            "channel, use Share channel > Copy channel ID, and add it again.")
     r.raise_for_status()
     root = ET.fromstring(r.content)
     ns = {"a": "http://www.w3.org/2005/Atom",
@@ -877,6 +891,16 @@ def esc(t: str) -> str:
     return fonts.markup(t)
 
 
+def where_it_broke(limit=4) -> str:
+    """Galti thik kis pankti par hui — Logs me saaf dikhe."""
+    try:
+        frames = traceback.extract_tb(sys.exc_info()[2])[-limit:]
+        return " <- ".join(f"{f.filename.split('/')[-1]}:{f.lineno} {f.name}()"
+                           for f in reversed(frames))
+    except Exception:
+        return ""
+
+
 def free_memory():
     """Jo chhoda ja sakta hai, use OS ko wapas kar do."""
     gc.collect()
@@ -1025,7 +1049,7 @@ def destination(row, data, default_tab="Episodes"):
 # ------------------------------------------------------------------ one video
 
 def process_video(video, channel_name, s, recipients, episode_no, serial_no,
-                  tab="Episodes", instruction=None, sid=""):
+                  tab="Episodes", instruction=None, sid="", replace_row=0):
     def step(msg):
         STATUS["step"] = f"{video['title'][:50]} — {msg} [{memory_mb()} MB]"
 
@@ -1103,7 +1127,7 @@ def process_video(video, channel_name, s, recipients, episode_no, serial_no,
                if s.get("attach_pdf", "yes") != "no"
                else f"Full transcript: {up['link']}\n"))
     attach = s.get("attach_pdf", "yes") != "no"
-    if recipients:
+    if recipients and not replace_row:
         gapi.send_mail(recipients, subject, body,
                        attachment=pdf if attach else None,
                        attachment_name=fname)
@@ -1113,11 +1137,15 @@ def process_video(video, channel_name, s, recipients, episode_no, serial_no,
     gc.collect()
     mark("done")
 
-    gapi.append_row_in(sid, tab, [
+    row_values = [
         serial_no, date_str, episode_no, video["link"], up["link"],
         sheet_transcript, summary, video["title"], channel_name,
         video["video_id"], ", ".join(recipients),
-    ])
+    ]
+    if replace_row:
+        gapi.update_row_in(sid, tab, replace_row, row_values)
+    else:
+        gapi.append_row_in(sid, tab, row_values)
     log("ok", f"Sent: {video['title']} (transcript via {source})")
     return up["link"]
 
@@ -1276,8 +1304,10 @@ def run_check(manual=False):
                     attempts = bump_state(v["video_id"], e, states)
                     states = state_map()
                     failed += 1
+                    spot = where_it_broke()
                     log("wait" if attempts < MAX_ATTEMPTS else "error",
-                        f"{v['title'][:60]} — {e} (attempt {attempts})")
+                        f"{v['title'][:60]} — {e} (attempt {attempts})"
+                        + (f" [{spot}]" if spot else ""))
                     if attempts == MAX_ATTEMPTS and recipients:
                         try:
                             gapi.send_mail(
@@ -1307,9 +1337,23 @@ def run_check(manual=False):
                 v = video_meta(vid)
                 to = [x.strip() for x in (q.get("Emails") or "").replace(";", ",").split(",")
                       if "@" in x] or recipients
-                serial = len(gapi.rows_in(sid, target)) + 1
+                again = str(q.get("Replace row") or "").strip()
+                again = int(again) if again.isdigit() else 0
+                if again:
+                    old_row = next((r for r in gapi.rows_in(sid, target)
+                                    if r["_row"] == again), {})
+                    serial = old_row.get("Sr.No.") or again - 1
+                    v["title"] = old_row.get("Title") or v["title"]
+                    STATUS["step"] = f"rebuilding — {v['title'][:44]}"
+                    old_pdf = gapi.file_id_from_link(old_row.get("PDF", ""))
+                else:
+                    serial = len(gapi.rows_in(sid, target)) + 1
+                    old_pdf = ""
                 process_video(v, v["channel"], s, to, "", serial, tab=target,
-                              instruction=q.get("Instruction") or None, sid=sid)
+                              instruction=q.get("Instruction") or None, sid=sid,
+                              replace_row=again)
+                if again and old_pdf:
+                    gapi.delete_file(old_pdf)
                 gapi.write_range("Queue", f"D{q['_row']}", [["done"]])
                 done += 1
                 free_memory()
@@ -1324,7 +1368,7 @@ def run_check(manual=False):
                 return STATUS["last_result"]
             except Exception as ex:
                 gapi.write_range("Queue", f"D{q['_row']}", [[f"error: {str(ex)[:120]}"]])
-                log("error", f"link {q['Video Link']}: {ex}")
+                log("error", f"link {q['Video Link']}: {ex} [{where_it_broke()}]")
                 failed += 1
 
         parts = []
@@ -1339,7 +1383,7 @@ def run_check(manual=False):
         return STATUS["last_result"]
     except Exception as e:
         STATUS["last_result"] = f"Problem: {e}"
-        log("error", f"run: {e}")
+        log("error", f"run: {e}\n{where_it_broke()}")
         return STATUS["last_result"]
     finally:
         free_memory()
