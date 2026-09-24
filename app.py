@@ -24,7 +24,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
 HELPER_KEY = os.environ.get("HELPER_KEY", "")
-BUILD = "30"
+BUILD = "31"
 
 
 # ---------------------------------------------------------------- background
@@ -1381,6 +1381,10 @@ def settings_page():
         if orr and not orr.startswith("sk-"):
             return back("/settings", "An OpenRouter key starts with sk-. Please "
                         "check that box.", True)
+        gem = request.form.get("gemini_key", "").strip()
+        if gem and not gem.startswith("AIza"):
+            return back("/settings", "A Google AI Studio key starts with AIza. "
+                        "Please check that box.", True)
         if prox and not re.match(r"^(https?|socks5h?)://", prox):
             return back("/settings", "A proxy address must start with http:// , "
                         "https:// or socks5:// — or leave the box empty.", True)
@@ -1400,6 +1404,7 @@ def settings_page():
             "openrouter_key": request.form.get("openrouter_key", "").strip(),
             "supadata_key": request.form.get("supadata_key", "").strip(),
             "proxy_url": request.form.get("proxy_url", "").strip(),
+            "gemini_key": request.form.get("gemini_key", "").strip(),
             "sms_provider": request.form.get("sms_provider", "").strip(),
             "fast2sms_key": request.form.get("fast2sms_key", "").strip(),
             "twilio_sid": request.form.get("twilio_sid", "").strip(),
@@ -1477,6 +1482,10 @@ def settings_page():
         fetch transcripts itself, with no monthly limit)</label>
       <input name="proxy_url" value="{e(s.get('proxy_url'))}"
         placeholder="http://user:password@host:port">
+      <label>Gemini key — free, from aistudio.google.com (Google reads the video
+        itself, so nothing is blocked and your PC is not needed)</label>
+      <input name="gemini_key" value="{e(s.get('gemini_key'))}"
+        placeholder="AIza…">
       <label>Supadata key</label>
       <input name="supadata_key" value="{e(s.get('supadata_key'))}">
       <div class="note" style="margin-top:6px">Both keys can also live in Render's environment

@@ -21,7 +21,7 @@ import traceback
 import gapi
 import fonts
 
-BUILD = "30"
+BUILD = "31"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -56,6 +56,8 @@ DEFAULTS = {
     "keep_awake": "yes",
     "supadata_blocked_until": "",
     "proxy_url": "",
+    "gemini_key": "",
+    "gemini_model": "",
     "attach_pdf": "yes",
     "whatsapp_length": "1200",
 }
@@ -132,6 +134,108 @@ def split_text(text: str, max_chars: int):
     if buf.strip():
         parts.append(buf.strip())
     return parts or [""]
+
+
+# ------------------------------------------------------- Gemini se transcript
+
+GEMINI_API = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_WINDOW = 1200          # 20 minute ke tukde — muft dariye me aa jaate hain
+GEMINI_MAX = 5 * 3600         # itne lambe video tak koshish
+_gemini_model = {"name": ""}
+
+
+def gemini_key(s=None):
+    s = s or settings()
+    return (os.environ.get("GEMINI_API_KEY") or s.get("gemini_key") or "").strip()
+
+
+def gemini_pick_model(key: str, s=None) -> str:
+    """Jo flash model aaj uplabdh ho, wahi chun lo."""
+    s = s or {}
+    chosen = (s.get("gemini_model") or "").strip()
+    if chosen:
+        return chosen
+    if _gemini_model["name"]:
+        return _gemini_model["name"]
+    try:
+        r = requests.get(f"{GEMINI_API}/models", params={"key": key}, timeout=40)
+        r.raise_for_status()
+        names = [m.get("name", "").replace("models/", "")
+                 for m in r.json().get("models", [])
+                 if "generateContent" in (m.get("supportedGenerationMethods") or [])]
+        flash = [n for n in names if "flash" in n and "lite" not in n
+                 and "thinking" not in n and "image" not in n]
+        flash.sort(reverse=True)
+        _gemini_model["name"] = flash[0] if flash else (names[0] if names else "")
+    except Exception as ex:
+        log("wait", f"Gemini: could not list models — {ex}")
+    return _gemini_model["name"] or "gemini-2.5-flash"
+
+
+def transcript_gemini(video_id: str, key: str, s=None):
+    """Google ki apni sevaa video ka link seedhe le leti hai — isliye
+    YouTube ka rokna yahan lagta hi nahi. Video ko 20-20 minute ke
+    tukdon me padha jaata hai, taaki muft dariya paar na ho."""
+    if not key:
+        raise RuntimeError("No Gemini key set.")
+    s = s or settings()
+    model = gemini_pick_model(key, s)
+    watch = f"https://www.youtube.com/watch?v={video_id}"
+    pieces, start, empty = [], 0, 0
+
+    while start < GEMINI_MAX:
+        end = start + GEMINI_WINDOW
+        prompt = (
+            "Transcribe this part of the video word for word, in the language "
+            "that is actually spoken. Begin each paragraph with its absolute "
+            "timestamp in the whole video, written as [mm:ss] or [h:mm:ss]. "
+            f"This part begins {stamp(start)} into the video, so your first "
+            "timestamp must be that or later. Start a new paragraph when the "
+            "speaker pauses or the subject turns. If this part is past the end "
+            "of the video, reply with the single word NOTHING. Output the "
+            "transcript only.")
+        body = {
+            "contents": [{"role": "user", "parts": [
+                {"fileData": {"fileUri": watch, "mimeType": "video/*"},
+                 "videoMetadata": {"startOffset": f"{start}s",
+                                   "endOffset": f"{end}s"}},
+                {"text": prompt}]}],
+            "generationConfig": {"mediaResolution": "MEDIA_RESOLUTION_LOW",
+                                 "temperature": 0, "maxOutputTokens": 8192},
+        }
+        r = requests.post(f"{GEMINI_API}/models/{model}:generateContent",
+                          params={"key": key}, json=body, timeout=600)
+        if r.status_code in (401, 403):
+            raise RuntimeError(f"Gemini refused ({r.status_code}). Check the key.")
+        if r.status_code == 429:
+            raise NoCredits("Gemini's free limit for now is used up.")
+        if r.status_code >= 400:
+            detail = r.text[:200]
+            if start == 0:
+                raise RuntimeError(f"Gemini {r.status_code}: {detail}")
+            break                       # video shayad yahin khatm ho gaya
+
+        try:
+            cand = r.json()["candidates"][0]
+            text = "".join(p.get("text", "")
+                           for p in cand.get("content", {}).get("parts", []))
+        except Exception:
+            text = ""
+        text = text.strip()
+
+        if not text or text.upper().startswith("NOTHING") or len(text) < 80:
+            empty += 1
+            if empty >= 1:
+                break
+        else:
+            pieces.append(text)
+        start = end
+        time.sleep(4)
+
+    full = re.sub(r"\n{3,}", "\n\n", "\n".join(pieces)).strip()
+    if len(full) < 200:
+        raise RuntimeError("Gemini returned almost nothing for this video.")
+    return full
 
 
 # ------------------------------------------------------------ samay ke nishan
@@ -688,11 +792,29 @@ def get_transcript(video_id: str, s=None):
     if text:
         return text, ("proxy" if proxy else "YouTube")
 
+    troubles = []
+    gkey = gemini_key(s)
+    if gkey:
+        try:
+            return transcript_gemini(video_id, gkey, s), "Gemini"
+        except NoCredits:
+            troubles.append("Gemini's free limit is used up for now")
+        except Exception as ex:
+            troubles.append(f"Gemini: {ex}")
+
     key = supadata_key(s)
-    if not key:
-        raise RuntimeError("No transcript yet. Waiting for your PC helper, "
-                           "a proxy, or a Supadata key.")
-    return transcript_supadata(video_id, key), "Supadata"
+    if key:
+        try:
+            return transcript_supadata(video_id, key), "Supadata"
+        except NoCredits:
+            raise
+        except Exception as ex:
+            troubles.append(f"Supadata: {ex}")
+
+    if troubles:
+        raise RuntimeError(" | ".join(troubles)[:400])
+    raise RuntimeError("No transcript yet. Add a Gemini key, run your PC helper, "
+                       "or set a proxy.")
 
 
 # ------------------------------------------------------------------ OpenRouter
