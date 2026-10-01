@@ -24,7 +24,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
 HELPER_KEY = os.environ.get("HELPER_KEY", "")
-BUILD = "31"
+BUILD = "32"
 
 
 # ---------------------------------------------------------------- background
@@ -1382,9 +1382,10 @@ def settings_page():
             return back("/settings", "An OpenRouter key starts with sk-. Please "
                         "check that box.", True)
         gem = request.form.get("gemini_key", "").strip()
-        if gem and not gem.startswith("AIza"):
-            return back("/settings", "A Google AI Studio key starts with AIza. "
-                        "Please check that box.", True)
+        if gem and (gem.startswith("sk-") or gem.startswith("sd_")
+                    or "googleusercontent.com" in gem or len(gem) < 20):
+            return back("/settings", "That does not look like a Google AI Studio "
+                        "key. Take it from aistudio.google.com/apikey.", True)
         if prox and not re.match(r"^(https?|socks5h?)://", prox):
             return back("/settings", "A proxy address must start with http:// , "
                         "https:// or socks5:// — or leave the box empty.", True)
@@ -1485,7 +1486,7 @@ def settings_page():
       <label>Gemini key — free, from aistudio.google.com (Google reads the video
         itself, so nothing is blocked and your PC is not needed)</label>
       <input name="gemini_key" value="{e(s.get('gemini_key'))}"
-        placeholder="AIza…">
+        placeholder="AIza… or AQ.…">
       <label>Supadata key</label>
       <input name="supadata_key" value="{e(s.get('supadata_key'))}">
       <div class="note" style="margin-top:6px">Both keys can also live in Render's environment
