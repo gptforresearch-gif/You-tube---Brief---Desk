@@ -24,7 +24,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
 HELPER_KEY = os.environ.get("HELPER_KEY", "")
-BUILD = "32"
+BUILD = "33"
 
 
 # ---------------------------------------------------------------- background
@@ -826,7 +826,8 @@ def dashboard():
                 "<div class='row' style='margin-top:14px'>"
                 "<a class='btn small' href='/channels'>Add a channel</a></div></div>")
 
-    blocked = pipeline.credits_blocked_until(s)
+    other_way = bool(pipeline.gemini_key(s) or (s.get("proxy_url") or "").strip())
+    blocked = None if other_way else pipeline.credits_blocked_until(s)
     warn = ""
     if blocked:
         warn = f"""<div class="card" style="border-color:#EBD2CC;background:#FCF6F4">

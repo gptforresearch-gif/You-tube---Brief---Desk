@@ -21,7 +21,7 @@ import traceback
 import gapi
 import fonts
 
-BUILD = "32"
+BUILD = "33"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -1330,7 +1330,9 @@ def run_check(manual=False):
             STATUS["last_result"] = "Paused in Settings."
             return STATUS["last_result"]
 
-        blocked = credits_blocked_until(s)
+        # Supadata ki rok tabhi maayne rakhti hai jab aur koi raasta na ho
+        other_way = bool(gemini_key(s) or (s.get("proxy_url") or "").strip())
+        blocked = None if other_way else credits_blocked_until(s)
         if blocked:
             STATUS["last_result"] = (
                 f"Waiting — Supadata credits are used up. Will try again after "
@@ -1420,6 +1422,9 @@ def run_check(manual=False):
                     until = block_credits()
                     log("error", f"Supadata credits are used up. Pausing until "
                                  f"{until.strftime('%d %b, %I:%M %p')}.")
+                    if other_way:
+                        failed += 1
+                        continue        # doosre raaste se aage badho
                     STATUS["last_result"] = "Supadata credits are used up."
                     return STATUS["last_result"]
                 except Exception as e:
