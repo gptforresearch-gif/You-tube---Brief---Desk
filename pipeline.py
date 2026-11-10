@@ -21,7 +21,7 @@ import traceback
 import gapi
 import fonts
 
-BUILD = "33"
+BUILD = "36"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -141,7 +141,7 @@ def split_text(text: str, max_chars: int):
 GEMINI_API = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_WINDOW = 1200          # 20 minute ke tukde — muft dariye me aa jaate hain
 GEMINI_MAX = 5 * 3600         # itne lambe video tak koshish
-_gemini_model = {"name": ""}
+_gemini_model = {"name": "", "tried": set()}
 
 
 def gemini_key(s=None):
@@ -149,27 +149,97 @@ def gemini_key(s=None):
     return (os.environ.get("GEMINI_API_KEY") or s.get("gemini_key") or "").strip()
 
 
-def gemini_pick_model(key: str, s=None) -> str:
-    """Jo flash model aaj uplabdh ho, wahi chun lo."""
+def gemini_headers(key: str) -> dict:
+    """Nayi AQ. waali keys sirf is header se chalti hain; purani AIza
+    waali bhi isi se chal jaati hain. Isliye hamesha header."""
+    return {"x-goog-api-key": key, "Content-Type": "application/json"}
+
+
+def _version_of(name: str):
+    """'gemini-3.6-flash' -> (3, 6) — taaki naya model pehle aaye."""
+    m = re.search(r"gemini-(\d+)(?:\.(\d+))?", name or "")
+    if not m:
+        return (0, 0)
+    return (int(m.group(1)), int(m.group(2) or 0))
+
+
+def gemini_models(key: str):
+    """Aaj jo model sach me kaam karte hain, unki soochi — naye pehle."""
+    r = requests.get(f"{GEMINI_API}/models", headers=gemini_headers(key),
+                     timeout=40)
+    if r.status_code in (401, 403):
+        raise RuntimeError(f"Gemini refused the key ({r.status_code}). "
+                           f"{r.text[:160]}")
+    r.raise_for_status()
+    names = [m.get("name", "").replace("models/", "")
+             for m in r.json().get("models", [])
+             if "generateContent" in (m.get("supportedGenerationMethods") or [])]
+    good = [n for n in names
+            if "flash" in n and not any(w in n for w in
+                                        ("lite", "thinking", "image", "tts",
+                                         "audio", "embedding", "live"))]
+    good.sort(key=lambda n: (_version_of(n), "preview" not in n), reverse=True)
+    return good or names
+
+
+def gemini_pick_model(key: str, s=None, force=False) -> str:
+    """Jo flash model aaj uplabdh ho, wahi chun lo. Google purane model
+    band karta rehta hai, isliye naam kabhi tay nahi kiya jaata."""
     s = s or {}
     chosen = (s.get("gemini_model") or "").strip()
-    if chosen:
+    if chosen and not force:
         return chosen
-    if _gemini_model["name"]:
+    if _gemini_model["name"] and not force:
         return _gemini_model["name"]
     try:
-        r = requests.get(f"{GEMINI_API}/models", params={"key": key}, timeout=40)
-        r.raise_for_status()
-        names = [m.get("name", "").replace("models/", "")
-                 for m in r.json().get("models", [])
-                 if "generateContent" in (m.get("supportedGenerationMethods") or [])]
-        flash = [n for n in names if "flash" in n and "lite" not in n
-                 and "thinking" not in n and "image" not in n]
-        flash.sort(reverse=True)
-        _gemini_model["name"] = flash[0] if flash else (names[0] if names else "")
+        for n in gemini_models(key):
+            if n not in _gemini_model["tried"]:
+                _gemini_model["name"] = n
+                log("ok", f"Gemini model: {n}")
+                return n
     except Exception as ex:
         log("wait", f"Gemini: could not list models — {ex}")
-    return _gemini_model["name"] or "gemini-2.5-flash"
+    return _gemini_model["name"] or ""
+
+
+def gemini_call(key: str, model: str, body: dict, timeout=600):
+    return requests.post(f"{GEMINI_API}/models/{model}:generateContent",
+                         headers=gemini_headers(key), json=body, timeout=timeout)
+
+
+def gemini_check(key: str, s=None) -> dict:
+    """Settings ke 'Test' button ke liye — sach me ek chhota sawaal
+    poochh kar dekho ki Gemini chal raha hai ya nahi."""
+    if not key:
+        return {"ok": False, "msg": "No Gemini key is set."}
+    try:
+        models = gemini_models(key)
+    except Exception as ex:
+        return {"ok": False, "msg": f"Could not reach Gemini — {ex}"}
+    if not models:
+        return {"ok": False, "msg": "This key cannot use any Gemini model."}
+
+    chosen = (s or {}).get("gemini_model", "").strip()
+    order = ([chosen] if chosen else []) + [m for m in models if m != chosen]
+    tried = []
+    for model in order[:4]:
+        try:
+            r = gemini_call(key, model,
+                            {"contents": [{"role": "user",
+                                           "parts": [{"text": "Reply with OK."}]}],
+                             "generationConfig": {"maxOutputTokens": 10}},
+                            timeout=60)
+        except Exception as ex:
+            tried.append(f"{model}: {ex}")
+            continue
+        if r.status_code < 400:
+            _gemini_model["name"] = model
+            return {"ok": True, "model": model,
+                    "msg": f"Gemini is working. Using {model}.",
+                    "all": models[:6]}
+        tried.append(f"{model}: {r.status_code} {r.text[:120]}")
+    return {"ok": False,
+            "msg": "Gemini answered, but no model would run. " + " | ".join(tried)[:400]}
 
 
 def transcript_gemini(video_id: str, key: str, s=None):
@@ -180,8 +250,11 @@ def transcript_gemini(video_id: str, key: str, s=None):
         raise RuntimeError("No Gemini key set.")
     s = s or settings()
     model = gemini_pick_model(key, s)
+    if not model:
+        raise RuntimeError("No usable Gemini model. Open Settings and press "
+                           "Test next to the Gemini key.")
     watch = f"https://www.youtube.com/watch?v={video_id}"
-    pieces, start, empty = [], 0, 0
+    pieces, start, empty, swaps = [], 0, 0, 0
 
     while start < GEMINI_MAX:
         end = start + GEMINI_WINDOW
@@ -203,16 +276,28 @@ def transcript_gemini(video_id: str, key: str, s=None):
             "generationConfig": {"mediaResolution": "MEDIA_RESOLUTION_LOW",
                                  "temperature": 0, "maxOutputTokens": 8192},
         }
-        r = requests.post(f"{GEMINI_API}/models/{model}:generateContent",
-                          params={"key": key}, json=body, timeout=600)
+        r = gemini_call(key, model, body)
+
         if r.status_code in (401, 403):
-            raise RuntimeError(f"Gemini refused ({r.status_code}). Check the key.")
+            raise RuntimeError(f"Gemini refused the key ({r.status_code}). "
+                               f"{r.text[:160]}")
         if r.status_code == 429:
             raise NoCredits("Gemini's free limit for now is used up.")
+        if r.status_code == 404 and swaps < 2:
+            # Google ne ye model band kar diya — doosra chun kar phir se
+            _gemini_model["tried"].add(model)
+            _gemini_model["name"] = ""
+            swaps += 1
+            nxt = gemini_pick_model(key, s, force=True)
+            if nxt and nxt != model:
+                log("wait", f"Gemini: {model} is gone, switching to {nxt}")
+                model = nxt
+                continue
+            raise RuntimeError(f"Gemini 404 on {model}: {r.text[:200]}")
         if r.status_code >= 400:
-            detail = r.text[:200]
+            detail = r.text[:220]
             if start == 0:
-                raise RuntimeError(f"Gemini {r.status_code}: {detail}")
+                raise RuntimeError(f"Gemini {r.status_code} on {model}: {detail}")
             break                       # video shayad yahin khatm ho gaya
 
         try:
@@ -234,7 +319,8 @@ def transcript_gemini(video_id: str, key: str, s=None):
 
     full = re.sub(r"\n{3,}", "\n\n", "\n".join(pieces)).strip()
     if len(full) < 200:
-        raise RuntimeError("Gemini returned almost nothing for this video.")
+        raise RuntimeError(f"Gemini ({model}) returned almost nothing for this "
+                           "video. It may be private, members-only or blocked.")
     return full
 
 
@@ -806,7 +892,10 @@ def get_transcript(video_id: str, s=None):
     if key:
         try:
             return transcript_supadata(video_id, key), "Supadata"
-        except NoCredits:
+        except NoCredits as ex:
+            # Gemini ki asli vajah bhi saath le jao, warna wo kho jaati hai
+            if troubles:
+                raise NoCredits(f"{ex} | " + " | ".join(troubles)[:300])
             raise
         except Exception as ex:
             troubles.append(f"Supadata: {ex}")
@@ -1392,7 +1481,7 @@ def run_check(manual=False):
             fresh.sort(key=lambda v: v["published"])
 
             for v in fresh:
-                if memory_mb() > 320:
+                if memory_mb() > 340:
                     STATUS["step"] = "memory is high — pausing until the next round"
                     log("wait", f"{memory_mb()} MB — skipping the rest this round")
                     break
@@ -1450,7 +1539,7 @@ def run_check(manual=False):
                    if q.get("Video Link")
                    and (q.get("Status") or "").lower() not in ("done", "skip", "error")]
         for q in pending[:2]:
-            if memory_mb() > 320:
+            if memory_mb() > 340:
                 log("wait", f"{memory_mb()} MB — the rest of the queue waits")
                 break
             vid = extract_video_id(q["Video Link"])

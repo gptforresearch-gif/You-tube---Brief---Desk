@@ -11,6 +11,26 @@ from flask import (Flask, request, redirect, url_for, session,
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 
+
+def _load_env_file(path=".env"):
+    """Apne PC par chalate waqt .env se settings utha lo.
+    Render par .env hoti hi nahi, isliye wahan kuch badalta nahi."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    except FileNotFoundError:
+        pass
+    except Exception as ex:
+        print(f"[.env] padhi nahi ja saki: {ex}", flush=True)
+
+
+_load_env_file()
+
 import gapi
 import pipeline
 from brand import LOGO, ICON, I192_B64, I512_B64, MASK_B64
@@ -24,7 +44,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
 HELPER_KEY = os.environ.get("HELPER_KEY", "")
-BUILD = "33"
+BUILD = "36"
 
 
 # ---------------------------------------------------------------- background
@@ -57,7 +77,9 @@ def _keepalive_loop():
         refresh_if_heavy()
 
 
-MEM_LIMIT = 380          # MB — isse upar jaane par app khud ko taaza kar leti hai
+MEM_LIMIT = 290          # MB — isse upar jaane par app khud ko taaza kar leti hai
+#  Ye seema pipeline ke 340 waale "is baari chhod do" se neeche hai, taaki app
+#  kaam chhodne se PEHLE hi apni memory saaf kar le.
 
 
 def refresh_if_heavy(where=""):
@@ -934,6 +956,18 @@ def api_status():
     return jsonify(pipeline.STATUS)
 
 
+@app.route("/test-gemini", methods=["POST"])
+def test_gemini():
+    if role_of(current_user()) not in ("owner", "admin"):
+        return back("/settings", "Only the owner can do that.", True)
+    s = pipeline.settings(force=True)
+    try:
+        session["gem_test"] = pipeline.gemini_check(pipeline.gemini_key(s), s)
+    except Exception as ex:
+        session["gem_test"] = {"ok": False, "msg": f"Could not test it — {ex}"}
+    return redirect("/settings")
+
+
 @app.route("/unblock", methods=["POST"])
 def unblock():
     if role_of(current_user()) not in ("owner", "admin"):
@@ -1418,6 +1452,18 @@ def settings_page():
 
     s = pipeline.settings()
     sel = lambda v: "selected" if s.get("summary_length") == v else ""
+    g = session.pop("gem_test", None)
+    gem_note = ""
+    if g:
+        tone = "#CFE0D9" if g.get("ok") else "#EBD2CC"
+        bg = "#F0F4F2" if g.get("ok") else "#FAEDEA"
+        extra = ""
+        if g.get("all"):
+            extra = (f'<div class="note" style="margin-top:5px">models this key '
+                     f'can use: {e(", ".join(g["all"]))}</div>')
+        gem_note = (f'<div style="background:{bg};border:1px solid {tone};'
+                    f'border-radius:8px;padding:10px 13px;margin:4px 0 9px;'
+                    f'font-size:13.5px">{e(g.get("msg"))}{extra}</div>')
     body = f"""<h2>Settings</h2><p class="sub">Connected Google account:
       {e(gapi.account_email())}</p>
     <form method="post">
@@ -1486,9 +1532,16 @@ def settings_page():
         placeholder="http://user:password@host:port">
       <label>Gemini key — free, from aistudio.google.com (Google reads the video
         itself, so nothing is blocked and your PC is not needed)</label>
+      {gem_note}
       <input name="gemini_key" value="{e(s.get('gemini_key'))}"
         placeholder="AIza… or AQ.…">
-      <label>Supadata key</label>
+      <div class="row" style="margin-top:9px">
+        <form method="post" action="/test-gemini" style="margin:0">
+          <button class="btn small ghost">Test the Gemini key</button>
+        </form>
+        <span class="note">checks it right now and says what it finds</span>
+      </div>
+      <label style="margin-top:16px">Supadata key</label>
       <input name="supadata_key" value="{e(s.get('supadata_key'))}">
       <div class="note" style="margin-top:6px">Both keys can also live in Render's environment
         — leave these blank in that case.</div>
