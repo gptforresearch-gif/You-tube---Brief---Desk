@@ -44,7 +44,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
 HELPER_KEY = os.environ.get("HELPER_KEY", "")
-BUILD = "38"
+BUILD = "39"
 
 
 # ---------------------------------------------------------------- background

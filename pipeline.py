@@ -21,7 +21,7 @@ import traceback
 import gapi
 import fonts
 
-BUILD = "38"
+BUILD = "39"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -133,6 +133,7 @@ def split_text(text: str, max_chars: int):
 GEMINI_API = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_WINDOW = 1200          # 20 minute ke tukde — muft dariye me aa jaate hain
 GEMINI_MAX = 5 * 3600         # itne lambe video tak koshish
+GEMINI_GAP = 30               # do tukdon ke beech itni der thaharo
 
 # Har key ka apna hisaab — kaun sa model chuna, kaun se model chhod diye
 _gemini_state = {}
@@ -224,6 +225,30 @@ def gemini_call(key: str, model: str, body: dict, timeout=600):
                          headers=gemini_headers(key), json=body, timeout=timeout)
 
 
+def quota_details(r):
+    """429 ke jawab me Google khud bata deta hai ki kaun si had lagi
+    aur kitni der baad phir koshish karni chahiye. Do tarah ki had
+    hoti hai: ek minute waali — jo chand second me khud khul jaati hai,
+    aur ek din waali — jo agle din hi khulti hai."""
+    delay, which = 0, ""
+    try:
+        err = (r.json() or {}).get("error", {}) or {}
+        for d in err.get("details", []) or []:
+            kind = str(d.get("@type", ""))
+            if kind.endswith("RetryInfo"):
+                m = re.search(r"(\d+(?:\.\d+)?)", str(d.get("retryDelay", "")))
+                if m:
+                    delay = int(float(m.group(1)))
+            if kind.endswith("QuotaFailure"):
+                for v in d.get("violations", []) or []:
+                    which = which or (v.get("quotaId")
+                                      or v.get("quotaMetric") or "")
+    except Exception:
+        pass
+    per_day = "perday" in which.replace("_", "").replace("-", "").lower()
+    return delay, which, per_day
+
+
 def gemini_video_check(key: str, model: str, video_id: str) -> dict:
     """Asli jaanch — ek video ka pehla ek minute padhwa kar dekho.
     Yahi wo kadam hai jo sach me kaam aata hai."""
@@ -242,8 +267,13 @@ def gemini_video_check(key: str, model: str, video_id: str) -> dict:
         return {"ok": False, "msg": f"Could not reach Gemini for the video — {ex}"}
 
     if r.status_code == 429:
-        return {"ok": False, "msg": "Gemini's free limit for videos is used up "
-                                    "right now. It usually frees up within a day."}
+        delay, which, per_day = quota_details(r)
+        when = ("It opens again tomorrow." if per_day else
+                f"This is a per-minute limit — it opens again in about "
+                f"{delay or 40} seconds.")
+        return {"ok": False, "msg": f"This key is at its free limit"
+                                    f"{' (' + which + ')' if which else ''}. "
+                                    f"{when}"}
     if r.status_code >= 400:
         return {"ok": False,
                 "msg": f"Gemini would not read the video ({r.status_code}): "
@@ -325,7 +355,7 @@ def transcript_gemini(video_id: str, key: str, s=None):
         raise RuntimeError("No usable Gemini model. Open Settings and press "
                            "Test next to the Gemini key.")
     watch = f"https://www.youtube.com/watch?v={video_id}"
-    pieces, start, empty, swaps = [], 0, 0, 0
+    pieces, start, empty, swaps, naps = [], 0, 0, 0, 0
 
     while start < GEMINI_MAX:
         key = keys[at]
@@ -360,16 +390,34 @@ def transcript_gemini(video_id: str, key: str, s=None):
             raise RuntimeError(f"Gemini refused the key ({r.status_code}). "
                                f"{r.text[:160]}")
         if r.status_code == 429:
-            # Is key ki aaj ki had khatm. Agli key usi tukde se shuru karegi.
+            delay, which, per_day = quota_details(r)
+
+            # Ek-minute waali had chand second me khud khul jaati hai —
+            # key badalne se pehle bas ruk kar dobara poochh lo.
+            if not per_day and naps < 5:
+                nap = min(max(delay or 40, 20), 90)
+                naps += 1
+                log("wait", f"Gemini: per-minute limit ({which or 'quota'}) — "
+                            f"waiting {nap}s, then the same key again")
+                time.sleep(nap)
+                continue
+
             if at + 1 < len(keys):
-                log("wait", f"Gemini: key {at + 1} is at its daily limit — "
-                            f"carrying on with key {at + 2}")
+                naps = 0
+                log("wait", f"Gemini: key {at + 1} is out "
+                            f"({which or 'quota'}) — carrying on with "
+                            f"key {at + 2}")
                 at += 1
                 model = gemini_pick_model(keys[at], s) or model
                 continue
+
             where = f" after {stamp(start)} of the video" if start else ""
-            raise NoCredits(f"All {len(keys)} Gemini key(s) are at their free "
-                            f"limit{where}. {r.text[:140]}")
+            kind = (f" The limit that ran out is {which}." if which else
+                    " Google did not say which limit.")
+            ex = NoCredits(f"All {len(keys)} Gemini key(s) are at their free "
+                           f"limit{where}.{kind}")
+            ex.per_day = per_day
+            raise ex
         if r.status_code == 404 and swaps < 2:
             # Google ne ye model band kar diya — doosra chun kar phir se
             st = _gstate(key)
@@ -403,7 +451,11 @@ def transcript_gemini(video_id: str, key: str, s=None):
         else:
             pieces.append(text)
         start = end
-        time.sleep(4)
+        naps = 0
+        # Ek tukda bees minute ka hota hai, aur Google ki ek-minute waali
+        # had usi se bhar jaati hai. Isliye do tukdon ke beech thahar kar
+        # chalte hain — muft me kaam nikal jaata hai.
+        time.sleep(GEMINI_GAP)
 
     full = re.sub(r"\n{3,}", "\n\n", "\n".join(pieces)).strip()
     if len(full) < 200:
@@ -780,8 +832,9 @@ def transcript_direct(video_id: str, proxy: str = ""):
 
 
 class NoCredits(RuntimeError):
-    """Gemini ki muft had aaj ke liye khatam — ab is baar koshish ka
-    koi fayda nahi. Kal apne aap khul jaati hai."""
+    """Gemini ki muft had khatam — ab is baar koshish ka koi fayda nahi.
+    per_day True ho to kal tak rukna hai, warna thodi der me khul jayegi."""
+    per_day = True
 
 
 class NotReady(RuntimeError):
@@ -1535,7 +1588,8 @@ def run_check(manual=False):
                     continue
                 except NoCredits as e:
                     # Baaki video par bhi yahi hoga — isliye yahin ruk jao.
-                    until = block_credits()
+                    # Din waali had kal khulti hai, minute waali turant.
+                    until = block_credits(6 if getattr(e, "per_day", True) else 1)
                     log("error", f"No transcript — {e}")
                     STATUS["last_result"] = (
                         f"{e} Will try again after "
