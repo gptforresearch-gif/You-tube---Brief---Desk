@@ -21,11 +21,10 @@ import traceback
 import gapi
 import fonts
 
-BUILD = "37"
+BUILD = "38"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
-SUPADATA_API_KEY = ""       # <-- apni Supadata key yahan daal sakte hain
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = "openai/gpt-4o-mini"
@@ -50,11 +49,10 @@ DEFAULTS = {
     "twilio_token": "",
     "twilio_from": "",
     "openrouter_key": "",
-    "supadata_key": "",
     "paused": "no",
     "check_every_hours": "3",
     "keep_awake": "yes",
-    "supadata_blocked_until": "",
+    "gemini_blocked_until": "",
     "proxy_url": "",
     "gemini_key": "",
     "gemini_model": "",
@@ -94,13 +92,7 @@ def openrouter_key(s=None):
             or s.get("openrouter_key") or OPENROUTER_API_KEY or "").strip()
 
 
-def supadata_key(s=None):
-    s = s or settings()
-    return (os.environ.get("SUPADATA_API_KEY")
-            or s.get("supadata_key") or SUPADATA_API_KEY or "").strip()
-
-
-SECRET_RE = re.compile(r"(sk-or-v1-|sk-|sd_|Bearer\s+)[A-Za-z0-9_\-]{8,}")
+SECRET_RE = re.compile(r"(sk-or-v1-|sk-|AQ\.|AIza|Bearer\s+)[A-Za-z0-9_\-]{8,}")
 
 
 def hide_keys(text: str) -> str:
@@ -141,12 +133,36 @@ def split_text(text: str, max_chars: int):
 GEMINI_API = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_WINDOW = 1200          # 20 minute ke tukde — muft dariye me aa jaate hain
 GEMINI_MAX = 5 * 3600         # itne lambe video tak koshish
-_gemini_model = {"name": "", "tried": set()}
+
+# Har key ka apna hisaab — kaun sa model chuna, kaun se model chhod diye
+_gemini_state = {}
+
+
+def _gstate(key: str) -> dict:
+    return _gemini_state.setdefault(key[-10:], {"name": "", "tried": set()})
+
+
+def gemini_keys(s=None):
+    """Ek se zyada key rakhi ja sakti hai. Google ki muft had har
+    Google account par alag hoti hai — isliye alag-alag Gmail se banayi
+    gayi keys milakar utni hi guna had mil jaati hai. Settings me ek
+    line par ek key."""
+    s = s or settings()
+    raw = (os.environ.get("GEMINI_API_KEY", "") + "\n"
+           + (s.get("gemini_key") or ""))
+    out, seen = [], set()
+    for part in re.split(r"[\s,;]+", raw):
+        part = part.strip()
+        if len(part) >= 20 and part not in seen:
+            seen.add(part)
+            out.append(part)
+    return out
 
 
 def gemini_key(s=None):
-    s = s or settings()
-    return (os.environ.get("GEMINI_API_KEY") or s.get("gemini_key") or "").strip()
+    """Pehli key — jahan sirf ek chahiye (jaise Settings ka Test button)."""
+    ks = gemini_keys(s)
+    return ks[0] if ks else ""
 
 
 def gemini_headers(key: str) -> dict:
@@ -186,20 +202,21 @@ def gemini_pick_model(key: str, s=None, force=False) -> str:
     """Jo flash model aaj uplabdh ho, wahi chun lo. Google purane model
     band karta rehta hai, isliye naam kabhi tay nahi kiya jaata."""
     s = s or {}
+    st = _gstate(key)
     chosen = (s.get("gemini_model") or "").strip()
     if chosen and not force:
         return chosen
-    if _gemini_model["name"] and not force:
-        return _gemini_model["name"]
+    if st["name"] and not force:
+        return st["name"]
     try:
         for n in gemini_models(key):
-            if n not in _gemini_model["tried"]:
-                _gemini_model["name"] = n
+            if n not in st["tried"]:
+                st["name"] = n
                 log("ok", f"Gemini model: {n}")
                 return n
     except Exception as ex:
         log("wait", f"Gemini: could not list models — {ex}")
-    return _gemini_model["name"] or ""
+    return st["name"] or ""
 
 
 def gemini_call(key: str, model: str, body: dict, timeout=600):
@@ -269,7 +286,7 @@ def gemini_check(key: str, s=None, video_id: str = "") -> dict:
             tried.append(f"{model}: {ex}")
             continue
         if r.status_code < 400:
-            _gemini_model["name"] = model
+            _gstate(key)["name"] = model
             if not video_id:
                 return {"ok": True, "model": model,
                         "msg": f"Gemini is working. Using {model}.",
@@ -292,11 +309,18 @@ def gemini_check(key: str, s=None, video_id: str = "") -> dict:
 def transcript_gemini(video_id: str, key: str, s=None):
     """Google ki apni sevaa video ka link seedhe le leti hai — isliye
     YouTube ka rokna yahan lagta hi nahi. Video ko 20-20 minute ke
-    tukdon me padha jaata hai, taaki muft dariya paar na ho."""
-    if not key:
+    tukdon me padha jaata hai, taaki muft dariya paar na ho.
+
+    `key` ek key bhi ho sakti hai aur keyon ki soochi bhi. Ek key ki
+    muft had khatm ho jaye to usi tukde par agli key utha li jaati hai."""
+    keys = [key] if isinstance(key, str) else list(key or [])
+    keys = [k.strip() for k in keys if k and k.strip()]
+    if not keys:
         raise RuntimeError("No Gemini key set.")
     s = s or settings()
-    model = gemini_pick_model(key, s)
+
+    at = 0                               # abhi kaun si key chal rahi hai
+    model = gemini_pick_model(keys[at], s)
     if not model:
         raise RuntimeError("No usable Gemini model. Open Settings and press "
                            "Test next to the Gemini key.")
@@ -304,6 +328,7 @@ def transcript_gemini(video_id: str, key: str, s=None):
     pieces, start, empty, swaps = [], 0, 0, 0
 
     while start < GEMINI_MAX:
+        key = keys[at]
         end = start + GEMINI_WINDOW
         prompt = (
             "Transcribe this part of the video word for word, in the language "
@@ -326,14 +351,30 @@ def transcript_gemini(video_id: str, key: str, s=None):
         r = gemini_call(key, model, body)
 
         if r.status_code in (401, 403):
+            if at + 1 < len(keys):
+                log("wait", f"Gemini: key {at + 1} refused "
+                            f"({r.status_code}) — trying key {at + 2}")
+                at += 1
+                model = gemini_pick_model(keys[at], s) or model
+                continue
             raise RuntimeError(f"Gemini refused the key ({r.status_code}). "
                                f"{r.text[:160]}")
         if r.status_code == 429:
-            raise NoCredits("Gemini's free limit for now is used up.")
+            # Is key ki aaj ki had khatm. Agli key usi tukde se shuru karegi.
+            if at + 1 < len(keys):
+                log("wait", f"Gemini: key {at + 1} is at its daily limit — "
+                            f"carrying on with key {at + 2}")
+                at += 1
+                model = gemini_pick_model(keys[at], s) or model
+                continue
+            where = f" after {stamp(start)} of the video" if start else ""
+            raise NoCredits(f"All {len(keys)} Gemini key(s) are at their free "
+                            f"limit{where}. {r.text[:140]}")
         if r.status_code == 404 and swaps < 2:
             # Google ne ye model band kar diya — doosra chun kar phir se
-            _gemini_model["tried"].add(model)
-            _gemini_model["name"] = ""
+            st = _gstate(key)
+            st["tried"].add(model)
+            st["name"] = ""
             swaps += 1
             nxt = gemini_pick_model(key, s, force=True)
             if nxt and nxt != model:
@@ -571,17 +612,16 @@ def resolve_channel(text: str):
                                        "Accept-Language": "en-US,en;q=0.9"}, timeout=25)
         r.raise_for_status()
     except Exception:
-        return resolve_channel_supadata(url, supadata_key())
+        raise RuntimeError("Could not open that channel page. Open the channel "
+                           "on YouTube, use 'Share channel' > 'Copy channel ID' "
+                           "to get the UC... id, and paste that here.")
     m = (re.search(r'"channelId":"(UC[\w-]{22})"', r.text)
          or re.search(r'"externalId":"(UC[\w-]{22})"', r.text)
          or re.search(r'channel/(UC[\w-]{22})', r.text))
     if not m:
-        try:
-            return resolve_channel_supadata(url, supadata_key())
-        except Exception:
-            raise RuntimeError("Could not find the channel ID from that link. Open the channel on YouTube, "
-                               "use 'Share channel' > 'Copy channel ID' to get the "
-                               "UC... id, and paste that here.")
+        raise RuntimeError("Could not find the channel ID from that link. Open the channel on YouTube, "
+                           "use 'Share channel' > 'Copy channel ID' to get the "
+                           "UC... id, and paste that here.")
     cid = m.group(1)
     name = ""
     t = re.search(r'<meta property="og:title" content="([^"]+)"', r.text)
@@ -619,14 +659,8 @@ def channel_title(cid: str) -> str:
 
 
 def fetch_feed(cid: str) -> dict:
-    """Pehle YouTube ka muft RSS. Wo mana kar de to Supadata se poochh lenge."""
-    try:
-        return fetch_feed_rss(cid)
-    except Exception as rss_error:
-        try:
-            return fetch_feed_supadata(cid, supadata_key())
-        except Exception as sup_error:
-            raise RuntimeError(f"{rss_error} | Supadata: {sup_error}")
+    """YouTube ka apna muft RSS — isme na key lagti hai na koi had hai."""
+    return fetch_feed_rss(cid)
 
 
 def fetch_feed_rss(cid: str) -> dict:
@@ -661,59 +695,6 @@ def fetch_feed_rss(cid: str) -> dict:
     return {"channel": channel, "videos": videos}
 
 
-def _sup_get(path, params, key, timeout=60):
-    if not key:
-        raise RuntimeError("No Supadata key set.")
-    r = requests.get(f"https://api.supadata.ai{path}", params=params,
-                     headers={"x-api-key": key}, timeout=timeout)
-    if r.status_code >= 400:
-        raise RuntimeError(f"Supadata {r.status_code}: {r.text[:160]}")
-    return r.json()
-
-
-def fetch_feed_supadata(cid: str, key: str) -> dict:
-    data = _sup_get("/v1/youtube/channel/videos", {"id": cid, "limit": 10}, key)
-    ids = data.get("videoIds") or data.get("videos") or data.get("shortVideoIds") or []
-    ids = [v.get("id") if isinstance(v, dict) else v for v in ids][:10]
-    channel_name = ""
-    try:
-        ch = _sup_get("/v1/youtube/channel", {"id": cid}, key)
-        channel_name = ch.get("name") or ch.get("title") or ""
-    except Exception:
-        pass
-    videos = []
-    for vid in ids:
-        try:
-            v = _sup_get("/v1/youtube/video", {"id": vid}, key)
-        except Exception:
-            continue
-        published = v.get("uploadDate") or v.get("publishedAt") or ""
-        try:
-            when = dt.datetime.fromisoformat(str(published).replace("Z", "+00:00"))
-        except Exception:
-            when = dt.datetime.now(dt.timezone.utc)
-        if when.tzinfo is None:
-            when = when.replace(tzinfo=dt.timezone.utc)
-        videos.append({
-            "video_id": vid,
-            "title": v.get("title", "") or vid,
-            "published": when,
-            "link": f"https://www.youtube.com/watch?v={vid}",
-        })
-    if not videos:
-        raise RuntimeError("Supadata returned no videos either.")
-    videos.sort(key=lambda x: x["published"], reverse=True)
-    return {"channel": channel_name, "videos": videos}
-
-
-def resolve_channel_supadata(text: str, key: str):
-    data = _sup_get("/v1/youtube/channel", {"id": text}, key)
-    cid = data.get("id") or data.get("channelId") or ""
-    if not cid.startswith("UC"):
-        raise RuntimeError("Channel ID not found.")
-    return cid, data.get("name") or data.get("title") or cid
-
-
 def extract_video_id(text: str) -> str:
     """Kisi bhi YouTube link se video id."""
     text = (text or "").strip()
@@ -726,7 +707,8 @@ def extract_video_id(text: str) -> str:
 
 
 def video_meta(video_id: str) -> dict:
-    """Title aur channel — pehle YouTube ka muft oEmbed, phir Supadata."""
+    """Title aur channel — pehle YouTube ka apna muft oEmbed, na mile
+    to koi muft public mirror. Dono me koi key nahi lagti."""
     title, channel = "", ""
     try:
         r = requests.get("https://www.youtube.com/oembed",
@@ -740,13 +722,19 @@ def video_meta(video_id: str) -> dict:
     except Exception:
         pass
     if not title:
-        try:
-            v = _sup_get("/v1/youtube/video", {"id": video_id}, supadata_key())
-            title = v.get("title", "")
-            channel = (v.get("channel") or {}).get("name", "") if isinstance(
-                v.get("channel"), dict) else v.get("channelName", "")
-        except Exception:
-            pass
+        for base in PUBLIC_MIRRORS:
+            try:
+                r = requests.get(f"{base}/api/v1/videos/{video_id}",
+                                 headers={"User-Agent": UA}, timeout=15)
+                if r.status_code >= 400:
+                    continue
+                v = r.json()
+                title = v.get("title", "")
+                channel = v.get("author", "")
+                if title:
+                    break
+            except Exception:
+                continue
     return {
         "video_id": video_id,
         "title": title or video_id,
@@ -792,7 +780,8 @@ def transcript_direct(video_id: str, proxy: str = ""):
 
 
 class NoCredits(RuntimeError):
-    """Supadata ke credits khatam — ab is baar koshish ka koi fayda nahi."""
+    """Gemini ki muft had aaj ke liye khatam — ab is baar koshish ka
+    koi fayda nahi. Kal apne aap khul jaati hai."""
 
 
 class NotReady(RuntimeError):
@@ -802,7 +791,7 @@ class NotReady(RuntimeError):
 
 def credits_blocked_until(s=None):
     s = s or settings()
-    raw = (s.get("supadata_blocked_until") or "").strip()
+    raw = (s.get("gemini_blocked_until") or "").strip()
     if not raw:
         return None
     try:
@@ -812,105 +801,98 @@ def credits_blocked_until(s=None):
     return when if when > dt.datetime.now() else None
 
 
-def block_credits(hours=12):
+def block_credits(hours=6):
+    """Had khatm ho to thodi der chup baith jao — har video par wahi
+    nakami dohrane se na quota bachta hai na Log saaf rehta hai."""
     until = dt.datetime.now() + dt.timedelta(hours=hours)
     try:
-        gapi.set_settings({"supadata_blocked_until": until.isoformat(timespec="minutes")})
+        gapi.set_settings({"gemini_blocked_until": until.isoformat(timespec="minutes")})
     except Exception:
         pass
     return until
 
 
-def transcript_supadata(video_id: str, key: str):
-    """Caption ho to caption, na ho to Supadata khud audio se bana deta hai."""
-    if not key:
-        raise RuntimeError("No Supadata key in Settings.")
-    headers = {"x-api-key": key}
-    watch = f"https://www.youtube.com/watch?v={video_id}"
-    attempts = [
-        ("https://api.supadata.ai/v1/transcript", {"url": watch, "mode": "auto"}),
-        ("https://api.supadata.ai/v1/youtube/transcript", {"videoId": video_id}),
-        ("https://api.supadata.ai/v1/transcript", {"url": watch, "text": "true",
-                                                  "mode": "auto"}),
-    ]
-    last_error = ""
-    for url, params in attempts:
+PUBLIC_MIRRORS = [
+    "https://inv.nadeko.net",
+    "https://invidious.nerdvpn.de",
+    "https://invidious.f5.si",
+    "https://yewtu.be",
+    "https://invidious.privacyredirect.com",
+]
+
+
+def _vtt_sec(t: str) -> float:
+    t = t.replace(",", ".")
+    bits = t.split(":")
+    if len(bits) == 3:
+        h, m, s = bits
+    else:
+        h, (m, s) = "0", bits
+    return int(h) * 3600 + int(m) * 60 + float(s)
+
+
+def vtt_to_blocks(vtt: str) -> str:
+    """Caption file (WebVTT/SRT) ko samay ke nishan waale tukdon me badlo."""
+    segs, last = [], ""
+    for m in re.finditer(
+            r"(\d{1,2}:\d{2}:\d{2}[.,]\d{1,3}|\d{1,2}:\d{2}[.,]\d{1,3})"
+            r"\s*-->\s*"
+            r"(\d{1,2}:\d{2}:\d{2}[.,]\d{1,3}|\d{1,2}:\d{2}[.,]\d{1,3})"
+            r"[^\n]*\n(.*?)(?=\n\s*\n|\Z)", vtt, re.S):
+        body = re.sub(r"<[^>]+>", "", m.group(3))
+        body = " ".join(body.split())
+        if not body or body == last:
+            continue            # apne-aap bani caption me lines dohrati hain
+        last = body
         try:
-            r = requests.get(url, headers=headers, params=params, timeout=90)
-        except Exception as e:
-            last_error = str(e)
+            a, b = _vtt_sec(m.group(1)), _vtt_sec(m.group(2))
+        except Exception:
             continue
-        if r.status_code in (401, 403):
-            raise RuntimeError(f"Supadata refused ({r.status_code}). Check the key.")
-        if r.status_code == 429:
-            raise NoCredits("Supadata credits for this month are used up.")
-        if r.status_code >= 400:
-            body = r.text[:300]
-            if "live stream" in body.lower() or "currently live" in body.lower():
-                raise NotReady("This video is still live. Waiting for the stream "
-                               "to end.")
-            last_error = f"{r.status_code} {body[:200]}"
+        segs.append((a, max(b - a, 0.0), body))
+    return natural_blocks(segs) if segs else ""
+
+
+def transcript_public(video_id: str) -> str:
+    """Muft public mirror server. Inka koi key nahi lagta aur koi had
+    nahi — par ye kabhi chalte hain kabhi nahi. Isliye chup-chaap
+    koshish karke aage badh jaate hain."""
+    for base in PUBLIC_MIRRORS:
+        try:
+            r = requests.get(f"{base}/api/v1/captions/{video_id}",
+                             headers={"User-Agent": UA}, timeout=20)
+            if r.status_code >= 400:
+                continue
+            caps = r.json().get("captions") or []
+            if not caps:
+                continue
+            pick = caps[0]
+            for c in caps:              # aadmi ka likha hua pehle
+                if "auto" not in (c.get("label", "") + c.get("language_code", "")).lower():
+                    pick = c
+                    break
+            url = pick.get("url") or ""
+            if not url:
+                continue
+            if url.startswith("/"):
+                url = base + url
+            t = requests.get(url, headers={"User-Agent": UA}, timeout=40)
+            if t.status_code >= 400 or len(t.text) < 200:
+                continue
+            text = vtt_to_blocks(t.text)
+            if len(text) > 200:
+                log("ok", f"Transcript from a free mirror ({base.split('//')[-1]})")
+                return text
+        except Exception:
             continue
-        data = r.json()
-        job = data.get("jobId") or data.get("job_id")
-        if job:
-            data = supadata_wait(job, headers)
-        text = supadata_text(data)
-        if text:
-            return text
-        last_error = str(data)[:200]
-    raise RuntimeError(f"No transcript. {last_error}")
-
-
-def supadata_wait(job_id: str, headers, max_wait=600):
-    url = f"https://api.supadata.ai/v1/transcript/{job_id}"
-    waited = 0
-    while waited < max_wait:
-        time.sleep(10)
-        waited += 10
-        r = requests.get(url, headers=headers, timeout=60)
-        if r.status_code >= 400:
-            continue
-        data = r.json()
-        status = (data.get("status") or "").lower()
-        if status in ("completed", "complete", "succeeded", "done") or data.get("content"):
-            return data
-        if status in ("failed", "error"):
-            raise RuntimeError(f"Supadata job failed: {data.get('error', '')}")
-    raise RuntimeError("Supadata took too long to answer.")
-
-
-def supadata_text(data) -> str:
-    """Tukde milen to samay ke nishan ke saath, warna saada text."""
-    if isinstance(data, str):
-        return re.sub(r"\s+", " ", data).strip()
-    content = data.get("content") or data.get("text") or data.get("transcript")
-    if isinstance(content, list):
-        segs = []
-        for c in content:
-            if isinstance(c, dict):
-                off = float(c.get("offset", c.get("start", c.get("startMs", 0))) or 0)
-                dur = float(c.get("duration", c.get("durationMs", 0)) or 0)
-                if off > 10000:            # milliseconds
-                    off, dur = off / 1000.0, dur / 1000.0
-                elif dur > 1000:
-                    dur = dur / 1000.0
-                segs.append((off, dur, c.get("text", "")))
-            else:
-                segs.append((0, 0, str(c)))
-        if segs and any(x[0] for x in segs):
-            return natural_blocks(segs)
-        content = " ".join(x[2] for x in segs)
-    if not content:
-        return ""
-    return re.sub(r"\s+", " ", str(content)).strip()
+    return ""
 
 
 def get_transcript(video_id: str, s=None):
-    """Teen raaste, isi kram me:
+    """Chaar raaste, isi kram me — sabse pehle wo jo muft hain:
        1. Aapke PC wale helper ne jo bhej diya ho (muft, bina seema)
-       2. Seedhe YouTube se — proxy diya ho to uske raaste (sasta, bina seema)
-       3. Supadata (mahine ke 100 muft)"""
+       2. Seedhe YouTube se — proxy diya ho to uske raaste
+       3. Muft public mirror (koi key nahi, par hamesha nahi chalta)
+       4. Gemini (har Google account ki apni muft had)"""
     s = s or settings()
     try:
         if video_id in gapi.inbox_ids():
@@ -925,32 +907,28 @@ def get_transcript(video_id: str, s=None):
     if text:
         return text, ("proxy" if proxy else "YouTube")
 
+    try:
+        text = transcript_public(video_id)
+        if text:
+            return text, "a free mirror"
+    except Exception:
+        pass
+
     troubles = []
-    gkey = gemini_key(s)
-    if gkey:
+    gkeys = gemini_keys(s)
+    if gkeys:
         try:
-            return transcript_gemini(video_id, gkey, s), "Gemini"
-        except NoCredits as ex:
-            troubles.append(f"Gemini hit its limit: {ex}")
+            return transcript_gemini(video_id, gkeys, s), "Gemini"
+        except NoCredits:
+            raise                       # had khatm — upar wala khud samajh lega
         except Exception as ex:
             troubles.append(f"Gemini: {ex}")
 
-    key = supadata_key(s)
-    if key:
-        try:
-            return transcript_supadata(video_id, key), "Supadata"
-        except NoCredits as ex:
-            # Gemini ki asli vajah bhi saath le jao, warna wo kho jaati hai
-            if troubles:
-                raise NoCredits(f"{ex} | " + " | ".join(troubles)[:300])
-            raise
-        except Exception as ex:
-            troubles.append(f"Supadata: {ex}")
-
     if troubles:
         raise RuntimeError(" | ".join(troubles)[:400])
-    raise RuntimeError("No transcript yet. Add a Gemini key, run your PC helper, "
-                       "or set a proxy.")
+    raise RuntimeError("No transcript yet. Add a Gemini key in Settings, run "
+                       "your PC helper, or set a proxy.")
+
 
 
 # ------------------------------------------------------------------ OpenRouter
@@ -1455,7 +1433,7 @@ def run_check(manual=False):
         return "A run is already in progress."
     STATUS.update({"running": True, "step": "starting",
                    "started": now_str()})
-    done, failed, skipped, gem_fails = 0, 0, 0, 0
+    done, failed, skipped = 0, 0, 0
     STATUS["did_work"] = False
     try:
         gapi.ensure_tabs()
@@ -1466,13 +1444,14 @@ def run_check(manual=False):
             STATUS["last_result"] = "Paused in Settings."
             return STATUS["last_result"]
 
-        # Supadata ki rok tabhi maayne rakhti hai jab aur koi raasta na ho
-        other_way = bool(gemini_key(s) or (s.get("proxy_url") or "").strip())
-        blocked = None if other_way else credits_blocked_until(s)
+        # Had khatm hone ke baad thodi der chup. 'Run now' par phir bhi
+        # koshish hogi — ho sakta hai aapne abhi nayi key daali ho.
+        blocked = None if manual else credits_blocked_until(s)
         if blocked:
             STATUS["last_result"] = (
-                f"Waiting — Supadata credits are used up. Will try again after "
-                f"{blocked.strftime('%d %b, %I:%M %p')}.")
+                f"Waiting — Gemini's free limit is used up. Will try again "
+                f"after {blocked.strftime('%d %b, %I:%M %p')}. Running your PC "
+                f"helper would keep things moving in the meantime.")
             return STATUS["last_result"]
 
         channels = [c for c in data["channels"]
@@ -1555,18 +1534,12 @@ def run_check(manual=False):
                     log("wait", f"{v['title'][:60]} — {e}")
                     continue
                 except NoCredits as e:
+                    # Baaki video par bhi yahi hoga — isliye yahin ruk jao.
                     until = block_credits()
                     log("error", f"No transcript — {e}")
-                    if other_way:
-                        failed += 1
-                        gem_fails += 1
-                        if gem_fails >= 2:
-                            STATUS["last_result"] = f"Transcript is failing — {e}"
-                            log("error", "Stopping this round — the same trouble "
-                                         "on every video.")
-                            return STATUS["last_result"]
-                        continue        # doosre raaste se aage badho
-                    STATUS["last_result"] = "Supadata credits are used up."
+                    STATUS["last_result"] = (
+                        f"{e} Will try again after "
+                        f"{until.strftime('%d %b, %I:%M %p')}.")
                     return STATUS["last_result"]
                 except Exception as e:
                     attempts = bump_state(v["video_id"], e, states)

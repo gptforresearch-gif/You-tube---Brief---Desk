@@ -44,7 +44,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
 HELPER_KEY = os.environ.get("HELPER_KEY", "")
-BUILD = "37"
+BUILD = "38"
 
 
 # ---------------------------------------------------------------- background
@@ -848,20 +848,23 @@ def dashboard():
                 "<div class='row' style='margin-top:14px'>"
                 "<a class='btn small' href='/channels'>Add a channel</a></div></div>")
 
-    other_way = bool(pipeline.gemini_key(s) or (s.get("proxy_url") or "").strip())
-    blocked = None if other_way else pipeline.credits_blocked_until(s)
+    blocked = pipeline.credits_blocked_until(s)
     warn = ""
     if blocked:
+        n = len(pipeline.gemini_keys(s))
         warn = f"""<div class="card" style="border-color:#EBD2CC;background:#FCF6F4">
-          <strong>Supadata credits are used up for this month.</strong>
+          <strong>Gemini's free limit is used up for now.</strong>
           <p class="note" style="margin:6px 0 0">New videos are waiting in line —
-            nothing is lost. They will be picked up as soon as credits are back.
-            Paused until {e(blocked.strftime('%d %b, %I:%M %p'))}.</p>
+            nothing is lost. Google opens the limit again on its own, usually
+            within a day. Waiting until {e(blocked.strftime('%d %b, %I:%M %p'))}.</p>
+          <p class="note" style="margin:6px 0 0">You have {n} Gemini
+            key{'' if n == 1 else 's'} saved. Each Google account gets its own
+            free limit, so adding a key made from another Gmail gives you that
+            much more room. Running your PC helper costs nothing at all.</p>
           <div class="row" style="margin-top:11px">
-            <a class="btn small ghost" href="https://dash.supadata.ai" target="_blank">
-              Open Supadata</a>
+            <a class="btn small ghost" href="/settings">Add another key</a>
             <form method="post" action="/unblock" style="margin:0">
-              <button class="btn small ghost">I have added credits — try now</button>
+              <button class="btn small ghost">Try now anyway</button>
             </form>
           </div></div>"""
 
@@ -970,10 +973,32 @@ def test_gemini():
                 break
     except Exception:
         pass
-    try:
-        session["gem_test"] = pipeline.gemini_check(pipeline.gemini_key(s), s, vid)
-    except Exception as ex:
-        session["gem_test"] = {"ok": False, "msg": f"Could not test it — {ex}"}
+    keys = pipeline.gemini_keys(s)
+    if not keys:
+        session["gem_test"] = {"ok": False, "msg": "No Gemini key is set yet."}
+        return redirect("/settings")
+
+    lines, good, sample, models = [], 0, "", []
+    for i, key in enumerate(keys, 1):
+        try:
+            r = pipeline.gemini_check(key, s, vid)
+        except Exception as ex:
+            r = {"ok": False, "msg": f"Could not test it — {ex}"}
+        lines.append(f"Key {i}: {r.get('msg', '')}")
+        if r.get("ok"):
+            good += 1
+            sample = sample or r.get("sample", "")
+            models = models or r.get("all", [])
+
+    if good:
+        head = (f"{good} of {len(keys)} key"
+                f"{'' if len(keys) == 1 else 's'} can read your videos right now.")
+    else:
+        head = ("No key can read a video right now. Each Google account has its "
+                "own free limit, so a key made from another Gmail would add "
+                "more room.")
+    session["gem_test"] = {"ok": bool(good), "msg": head, "sample": sample,
+                           "all": models, "lines": lines}
     return redirect("/settings")
 
 
@@ -981,7 +1006,7 @@ def test_gemini():
 def unblock():
     if role_of(current_user()) not in ("owner", "admin"):
         return back("/", "Only the owner can do that.", True)
-    gapi.set_settings({"supadata_blocked_until": ""})
+    gapi.set_settings({"gemini_blocked_until": ""})
     pipeline.run_in_background(manual=True)
     return back("/", "Trying again now.")
 
@@ -1416,20 +1441,19 @@ def settings_page():
     if not gapi.has_token():
         return page("Settings", SETUP_BODY, "/settings")
     if request.method == "POST":
-        sup = request.form.get("supadata_key", "").strip()
         orr = request.form.get("openrouter_key", "").strip()
         prox = request.form.get("proxy_url", "").strip()
-        if sup.startswith("sk-or"):
-            return back("/settings", "That looks like an OpenRouter key, not a "
-                        "Supadata key. Each one goes in its own box.", True)
         if orr and not orr.startswith("sk-"):
             return back("/settings", "An OpenRouter key starts with sk-. Please "
                         "check that box.", True)
-        gem = request.form.get("gemini_key", "").strip()
-        if gem and (gem.startswith("sk-") or gem.startswith("sd_")
-                    or "googleusercontent.com" in gem or len(gem) < 20):
-            return back("/settings", "That does not look like a Google AI Studio "
-                        "key. Take it from aistudio.google.com/apikey.", True)
+        # Gemini box me ek line par ek key — har line alag se jaanch lo
+        for line in re.split(r"[\s,;]+", request.form.get("gemini_key", "")):
+            line = line.strip()
+            if line and (line.startswith("sk-")
+                         or "googleusercontent.com" in line or len(line) < 20):
+                return back("/settings", "One of the Gemini keys does not look "
+                            "right. Take each one from aistudio.google.com/apikey "
+                            "and put one on each line.", True)
         if prox and not re.match(r"^(https?|socks5h?)://", prox):
             return back("/settings", "A proxy address must start with http:// , "
                         "https:// or socks5:// — or leave the box empty.", True)
@@ -1447,9 +1471,11 @@ def settings_page():
             "output_title": request.form.get("output_title", "").strip(),
             "output_style": request.form.get("output_style", "timeline"),
             "openrouter_key": request.form.get("openrouter_key", "").strip(),
-            "supadata_key": request.form.get("supadata_key", "").strip(),
             "proxy_url": request.form.get("proxy_url", "").strip(),
-            "gemini_key": request.form.get("gemini_key", "").strip(),
+            # ek line par ek key — saaf-suthra karke rakh do
+            "gemini_key": "\n".join(
+                k for k in re.split(r"[\s,;]+",
+                                    request.form.get("gemini_key", "")) if k),
             "sms_provider": request.form.get("sms_provider", "").strip(),
             "fast2sms_key": request.form.get("fast2sms_key", "").strip(),
             "twilio_sid": request.form.get("twilio_sid", "").strip(),
@@ -1467,6 +1493,9 @@ def settings_page():
         tone = "#CFE0D9" if g.get("ok") else "#EBD2CC"
         bg = "#F0F4F2" if g.get("ok") else "#FAEDEA"
         extra = ""
+        for line in (g.get("lines") or []):
+            extra += (f'<div class="note" style="margin-top:4px">'
+                      f'{e(line[:220])}</div>')
         if g.get("sample"):
             extra += (f'<div class="note" style="margin-top:6px">it read back: '
                       f'“{e(g["sample"][:140])}…”</div>')
@@ -1542,22 +1571,28 @@ def settings_page():
         fetch transcripts itself, with no monthly limit)</label>
       <input name="proxy_url" value="{e(s.get('proxy_url'))}"
         placeholder="http://user:password@host:port">
-      <label>Gemini key — free, from aistudio.google.com (Google reads the video
-        itself, so nothing is blocked and your PC is not needed)</label>
+      <label>Gemini keys — free, from aistudio.google.com (Google reads the
+        video itself, so nothing is blocked and your PC is not needed)</label>
       {gem_note}
-      <input name="gemini_key" value="{e(s.get('gemini_key'))}"
-        placeholder="AIza… or AQ.…">
+      <textarea name="gemini_key" rows="4" style="font-family:ui-monospace,
+        SFMono-Regular,Menlo,monospace;font-size:13px"
+        placeholder="AIza… or AQ.…&#10;one key on each line"
+        >{e(s.get('gemini_key'))}</textarea>
+      <div class="note" style="margin-top:6px">
+        <strong>One key on each line.</strong> Google's free limit is counted per
+        Google account, so a second key made from a different Gmail doubles how
+        much the app can do in a day. When one key is spent the app moves to the
+        next one on its own — even in the middle of a video.
+      </div>
       <div class="row" style="margin-top:9px">
         <form method="post" action="/test-gemini" style="margin:0">
-          <button class="btn small ghost">Test the Gemini key</button>
+          <button class="btn small ghost">Test the Gemini keys</button>
         </form>
-        <span class="note">reads a minute of your latest video and says what
-          it finds — takes about 20 seconds</span>
+        <span class="note">reads a minute of your latest video with each key and
+          says what it finds — takes about 20 seconds per key</span>
       </div>
-      <label style="margin-top:16px">Supadata key</label>
-      <input name="supadata_key" value="{e(s.get('supadata_key'))}">
-      <div class="note" style="margin-top:6px">Both keys can also live in Render's environment
-        — leave these blank in that case.</div>
+      <div class="note" style="margin-top:14px">Keys can also live in Render's
+        environment — leave this blank in that case.</div>
     </div>
     <div class="card">
       <div class="note" style="margin-bottom:10px">SMS for phone verification —
