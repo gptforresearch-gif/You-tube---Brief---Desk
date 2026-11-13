@@ -21,7 +21,7 @@ import traceback
 import gapi
 import fonts
 
-BUILD = "36"
+BUILD = "37"
 
 # -------- API keys: yahan paste kar sakte hain, ya Settings page se bhi chalega
 OPENROUTER_API_KEY = ""     # <-- apni OpenRouter key yahan daal sakte hain
@@ -207,9 +207,45 @@ def gemini_call(key: str, model: str, body: dict, timeout=600):
                          headers=gemini_headers(key), json=body, timeout=timeout)
 
 
-def gemini_check(key: str, s=None) -> dict:
-    """Settings ke 'Test' button ke liye — sach me ek chhota sawaal
-    poochh kar dekho ki Gemini chal raha hai ya nahi."""
+def gemini_video_check(key: str, model: str, video_id: str) -> dict:
+    """Asli jaanch — ek video ka pehla ek minute padhwa kar dekho.
+    Yahi wo kadam hai jo sach me kaam aata hai."""
+    body = {
+        "contents": [{"role": "user", "parts": [
+            {"fileData": {"fileUri": f"https://www.youtube.com/watch?v={video_id}",
+                          "mimeType": "video/*"},
+             "videoMetadata": {"startOffset": "0s", "endOffset": "60s"}},
+            {"text": "Transcribe the first minute of this video word for word."}]}],
+        "generationConfig": {"mediaResolution": "MEDIA_RESOLUTION_LOW",
+                             "temperature": 0, "maxOutputTokens": 800},
+    }
+    try:
+        r = gemini_call(key, model, body, timeout=180)
+    except Exception as ex:
+        return {"ok": False, "msg": f"Could not reach Gemini for the video — {ex}"}
+
+    if r.status_code == 429:
+        return {"ok": False, "msg": "Gemini's free limit for videos is used up "
+                                    "right now. It usually frees up within a day."}
+    if r.status_code >= 400:
+        return {"ok": False,
+                "msg": f"Gemini would not read the video ({r.status_code}): "
+                       f"{r.text[:260]}"}
+    try:
+        parts = r.json()["candidates"][0].get("content", {}).get("parts", [])
+        text = "".join(p.get("text", "") for p in parts).strip()
+    except Exception:
+        text = ""
+    if len(text) < 40:
+        return {"ok": False,
+                "msg": "Gemini answered but sent no words back. The video may be "
+                       "private, members-only, or region-blocked."}
+    return {"ok": True, "sample": text[:200]}
+
+
+def gemini_check(key: str, s=None, video_id: str = "") -> dict:
+    """Settings ke 'Test' button ke liye — sach me poochh kar dekho
+    ki Gemini chal raha hai ya nahi, aur video padh pata hai ya nahi."""
     if not key:
         return {"ok": False, "msg": "No Gemini key is set."}
     try:
@@ -234,9 +270,20 @@ def gemini_check(key: str, s=None) -> dict:
             continue
         if r.status_code < 400:
             _gemini_model["name"] = model
-            return {"ok": True, "model": model,
-                    "msg": f"Gemini is working. Using {model}.",
-                    "all": models[:6]}
+            if not video_id:
+                return {"ok": True, "model": model,
+                        "msg": f"Gemini is working. Using {model}.",
+                        "all": models[:6]}
+            vid = gemini_video_check(key, model, video_id)
+            if vid["ok"]:
+                return {"ok": True, "model": model,
+                        "msg": f"Gemini is working and can read your videos. "
+                               f"Using {model}.",
+                        "all": models[:6],
+                        "sample": vid.get("sample", "")}
+            return {"ok": False, "model": model, "all": models[:6],
+                    "msg": f"The key works ({model} answers), but reading the "
+                           f"video failed. {vid['msg']}"}
         tried.append(f"{model}: {r.status_code} {r.text[:120]}")
     return {"ok": False,
             "msg": "Gemini answered, but no model would run. " + " | ".join(tried)[:400]}
@@ -883,8 +930,8 @@ def get_transcript(video_id: str, s=None):
     if gkey:
         try:
             return transcript_gemini(video_id, gkey, s), "Gemini"
-        except NoCredits:
-            troubles.append("Gemini's free limit is used up for now")
+        except NoCredits as ex:
+            troubles.append(f"Gemini hit its limit: {ex}")
         except Exception as ex:
             troubles.append(f"Gemini: {ex}")
 
@@ -1408,7 +1455,7 @@ def run_check(manual=False):
         return "A run is already in progress."
     STATUS.update({"running": True, "step": "starting",
                    "started": now_str()})
-    done, failed, skipped = 0, 0, 0
+    done, failed, skipped, gem_fails = 0, 0, 0, 0
     STATUS["did_work"] = False
     try:
         gapi.ensure_tabs()
@@ -1509,10 +1556,15 @@ def run_check(manual=False):
                     continue
                 except NoCredits as e:
                     until = block_credits()
-                    log("error", f"Supadata credits are used up. Pausing until "
-                                 f"{until.strftime('%d %b, %I:%M %p')}.")
+                    log("error", f"No transcript — {e}")
                     if other_way:
                         failed += 1
+                        gem_fails += 1
+                        if gem_fails >= 2:
+                            STATUS["last_result"] = f"Transcript is failing — {e}"
+                            log("error", "Stopping this round — the same trouble "
+                                         "on every video.")
+                            return STATUS["last_result"]
                         continue        # doosre raaste se aage badho
                     STATUS["last_result"] = "Supadata credits are used up."
                     return STATUS["last_result"]
@@ -1576,11 +1628,10 @@ def run_check(manual=False):
             except NotReady as ex:
                 log("wait", f"{q['Video Link']} — {ex}")
                 continue
-            except NoCredits:
-                until = block_credits()
-                log("error", f"Supadata credits are used up. Pausing until "
-                             f"{until.strftime('%d %b, %I:%M %p')}.")
-                STATUS["last_result"] = "Supadata credits are used up."
+            except NoCredits as ex:
+                block_credits()
+                log("error", f"No transcript — {ex}")
+                STATUS["last_result"] = f"No transcript — {ex}"
                 return STATUS["last_result"]
             except Exception as ex:
                 gapi.write_range("Queue", f"D{q['_row']}", [[f"error: {str(ex)[:120]}"]])

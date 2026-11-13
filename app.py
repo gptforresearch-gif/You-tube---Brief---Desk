@@ -44,7 +44,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "badal-dijiye-ise")
 UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
 CRON_KEY = os.environ.get("CRON_KEY", "")
 HELPER_KEY = os.environ.get("HELPER_KEY", "")
-BUILD = "36"
+BUILD = "37"
 
 
 # ---------------------------------------------------------------- background
@@ -961,8 +961,17 @@ def test_gemini():
     if role_of(current_user()) not in ("owner", "admin"):
         return back("/settings", "Only the owner can do that.", True)
     s = pipeline.settings(force=True)
+    vid = ""
     try:
-        session["gem_test"] = pipeline.gemini_check(pipeline.gemini_key(s), s)
+        # aapke apne sabse naye video par jaanchenge — wahi asli haal batayega
+        for row in reversed(gapi.read_all()["episodes"] or []):
+            if row.get("Video ID"):
+                vid = row["Video ID"]
+                break
+    except Exception:
+        pass
+    try:
+        session["gem_test"] = pipeline.gemini_check(pipeline.gemini_key(s), s, vid)
     except Exception as ex:
         session["gem_test"] = {"ok": False, "msg": f"Could not test it — {ex}"}
     return redirect("/settings")
@@ -1458,9 +1467,12 @@ def settings_page():
         tone = "#CFE0D9" if g.get("ok") else "#EBD2CC"
         bg = "#F0F4F2" if g.get("ok") else "#FAEDEA"
         extra = ""
+        if g.get("sample"):
+            extra += (f'<div class="note" style="margin-top:6px">it read back: '
+                      f'“{e(g["sample"][:140])}…”</div>')
         if g.get("all"):
-            extra = (f'<div class="note" style="margin-top:5px">models this key '
-                     f'can use: {e(", ".join(g["all"]))}</div>')
+            extra += (f'<div class="note" style="margin-top:5px">models this key '
+                      f'can use: {e(", ".join(g["all"]))}</div>')
         gem_note = (f'<div style="background:{bg};border:1px solid {tone};'
                     f'border-radius:8px;padding:10px 13px;margin:4px 0 9px;'
                     f'font-size:13.5px">{e(g.get("msg"))}{extra}</div>')
@@ -1539,7 +1551,8 @@ def settings_page():
         <form method="post" action="/test-gemini" style="margin:0">
           <button class="btn small ghost">Test the Gemini key</button>
         </form>
-        <span class="note">checks it right now and says what it finds</span>
+        <span class="note">reads a minute of your latest video and says what
+          it finds — takes about 20 seconds</span>
       </div>
       <label style="margin-top:16px">Supadata key</label>
       <input name="supadata_key" value="{e(s.get('supadata_key'))}">
